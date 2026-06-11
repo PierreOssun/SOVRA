@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+authors = ["Pierre Ossun"]
+description = "Sovra"
+
+[workspace.dependencies]
+alloy-consensus = "2.0.5"
+alloy-primitives = "1.6.0"
+thiserror = "2.0.18"

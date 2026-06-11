@@ -1,0 +1,11 @@
+[package]
+name = "sovra-eth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["k256"] }
+alloy-consensus = { workspace = true, features = ["k256"] }
+thiserror = { workspace = true }
+alloy-signer = "2.0.5"
+alloy-signer-local = "2.0.5"

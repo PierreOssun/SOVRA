@@ -1,6 +1,6 @@
 # 2-of-2 MPC Signer – DLKs23
 
-This repo is for showvase purposes only.     
+This repo is for showcase purposes only.     
 It uses the (silence-laboratories DKLs23)[https://github.com/silence-laboratories/dkls23] as MPC TSS crypto implementation that has been audited but that is under commercial license.
 
 ## This repository contains:

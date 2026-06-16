@@ -1,0 +1,14 @@
+[package]
+name = "sovra-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+config = "0.15"
+serde = { version = "1", features = ["derive"] }
+sovra-eth = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+alloy-primitives = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }

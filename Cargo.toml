@@ -8,6 +8,18 @@ authors = ["Pierre Ossun"]
 description = "Sovra"
 
 [workspace.dependencies]
+sovra-eth = { path = "crates/sovra-eth" }
 alloy-consensus = "2.0.5"
 alloy-primitives = "1.6.0"
+alloy-provider = "2.1.0"
+alloy-transport = "2.1.0"
+alloy-network = "2.1.0"
+alloy-rpc-types-eth = "2.1.0"
 thiserror = "2.0.18"
+tokio = "1.52.3"
+alloy-signer = "2.0.5"
+alloy-signer-local = "2.0.5"
+url = "2.5.8"
+http = "1.4.2"
+axum = "0.8.9"
+serde_json = "1.0.150"

@@ -1,4 +1,7 @@
+use crate::prepare::*;
+use crate::types::*;
 use crate::*;
+
 use alloy_consensus::private::alloy_eips::Decodable2718;
 use alloy_consensus::transaction::SignerRecoverable;
 use alloy_consensus::{Transaction, TxEnvelope};
@@ -56,7 +59,10 @@ fn invalid_inputs_return_error() {
         max_priority_fee_per_gas: 2,
         data: Default::default(),
     };
-    assert_eq!(prepare(tx_intent).unwrap_err(), PrepareError::ZeroChainId);
+    assert!(matches!(
+        prepare(tx_intent).unwrap_err(),
+        PrepareError::ZeroChainId
+    ));
 
     let tx_intent_2 = TxIntent {
         chain_id: 11155111,
@@ -68,10 +74,10 @@ fn invalid_inputs_return_error() {
         max_priority_fee_per_gas: 2,
         data: Default::default(),
     };
-    assert_eq!(
+    assert!(matches!(
         prepare(tx_intent_2).unwrap_err(),
         PrepareError::ZeroGasLimit
-    );
+    ));
 
     let tx_intent_3 = TxIntent {
         chain_id: 11155111,
@@ -83,10 +89,10 @@ fn invalid_inputs_return_error() {
         max_priority_fee_per_gas: 2,
         data: Default::default(),
     };
-    assert_eq!(
+    assert!(matches!(
         prepare(tx_intent_3).unwrap_err(),
         PrepareError::MaxPriorityFeeExceedsMaxFee
-    );
+    ));
 }
 
 #[test]
@@ -107,13 +113,11 @@ fn finalize_rejects_wrong_expected_from() {
     let (r, s, v) = sign(&prepared, &signer);
     let wrong = Address::from([0xff; 20]);
 
-    assert_eq!(
+    assert!(matches!(
         finalize(prepared, r, s, v, wrong).unwrap_err(),
-        FinalizeError::AddressMismatch {
-            expected: wrong,
-            recovered: signer.address()
-        }
-    );
+        FinalizeError::AddressMismatch { expected, recovered }
+            if expected == wrong && recovered == signer.address()
+    ))
 }
 
 #[test]

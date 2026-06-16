@@ -1,9 +1,11 @@
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, TxNonce, U256};
+use alloy_transport::TransportError;
 use thiserror::Error;
+use url::ParseError;
 
 /// The caller's input
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TxIntent {
     pub chain_id: ChainId,
     pub nonce: TxNonce,
@@ -16,7 +18,7 @@ pub struct TxIntent {
 }
 
 /// The output of 'prepare_tx'
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PreparedTx {
     pub tx: TxEip1559,
     pub signing_hash: B256,
@@ -38,7 +40,7 @@ impl From<TxIntent> for TxEip1559 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SignedTx {
     /// EIP-2718 encoded, ready to broadcast (starts 0x02)
     pub raw: Bytes,
@@ -48,8 +50,15 @@ pub struct SignedTx {
     pub from: Address,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct TxRequest {
+    pub to: Address,
+    pub value: U256,
+    pub data: Bytes,
+}
+
 /// Errors that can occur during 'prepare_tx'
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug)]
 pub enum PrepareError {
     #[error("chain id must not be zero")]
     ZeroChainId,
@@ -59,9 +68,12 @@ pub enum PrepareError {
 
     #[error("gas limit must not be zero")]
     ZeroGasLimit,
+
+    #[error("failed to enrich transaction from RPC: {0}")]
+    Enrich(#[from] EnrichError),
 }
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug)]
 pub enum FinalizeError {
     #[error("could not recover signer from signature")]
     Recovery,
@@ -70,4 +82,16 @@ pub enum FinalizeError {
         expected: Address,
         recovered: Address,
     },
+}
+
+#[derive(Error, Debug)]
+pub enum EnrichError {
+    #[error("rpc call failed: {0}")]
+    Rpc(#[from] TransportError),
+}
+
+#[derive(Error, Debug)]
+pub enum ProviderError {
+    #[error("invalid RPC URL: {0}")]
+    InvalidUrl(#[from] ParseError),
 }

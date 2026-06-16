@@ -1,0 +1,6 @@
+/target
+certs/**
+data/**
+**/target/
+.idea/
+crates/*/Cargo.lock

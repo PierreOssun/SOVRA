@@ -8,7 +8,7 @@ config = "0.15"
 serde = { version = "1", features = ["derive"] }
 sovra-eth = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-alloy-primitives = { workspace = true }
-http = { workspace = true }
+alloy-primitives = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 axum = { workspace = true }
+alloy-provider = { workspace = true }

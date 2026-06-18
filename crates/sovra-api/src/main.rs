@@ -1,26 +1,29 @@
+use crate::api::AppState;
 use crate::config::Config;
-use alloy_primitives::{Address, U256};
-use sovra_eth::{TxRequest, http_provider, prepare_from_rpc};
+use alloy_provider::Provider;
+use axum::Router;
+use axum::routing::post;
+use sovra_eth::http_provider;
 
+mod api;
 mod config;
 mod errors;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
+    let provider = http_provider(&config.rpc_url)?.erased();
+    let state = AppState { provider };
 
-    let provider = http_provider(&config.rpc_url)?;
+    let app = Router::new()
+        .route("/v1/prepare", post(api::prepare))
+        .with_state(state);
 
-    // dummy for now
-    let req = TxRequest {
-        to: Address::from([0x11; 20]),
-        value: U256::from(1_000_000_000u64),
-        data: Default::default(),
-    };
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
 
-    let from = Address::from([0x22; 20]);
+    println!("listening on {}", config.bind_addr);
 
-    let _prepared = prepare_from_rpc(req, from, &provider).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

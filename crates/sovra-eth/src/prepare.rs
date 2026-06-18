@@ -68,7 +68,7 @@ pub async fn enrich<P: Provider>(
     Ok(tx_intent)
 }
 
-pub fn http_provider(url: &str) -> Result<impl Provider, ProviderError> {
+pub fn http_provider(url: &str) -> Result<impl Provider + use<>, ProviderError> {
     let url = Url::parse(url)?;
     Ok(ProviderBuilder::new().connect_http(url))
 }

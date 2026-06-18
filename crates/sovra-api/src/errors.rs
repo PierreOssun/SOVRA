@@ -1,10 +1,16 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use sovra_eth::PrepareError;
 
 pub struct ApiError(pub PrepareError);
 
 impl From<PrepareError> for ApiError {
-    fn from(e: PrepareError) -> Self { ApiError(e) }
+    fn from(e: PrepareError) -> Self {
+        ApiError(e)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -15,6 +21,10 @@ impl IntoResponse for ApiError {
             | PrepareError::ZeroGasLimit
             | PrepareError::MaxPriorityFeeExceedsMaxFee => StatusCode::BAD_REQUEST,
         };
-        (status, Json(serde_json::json!({ "error": self.0.to_string() }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": self.0.to_string() })),
+        )
+            .into_response()
     }
 }

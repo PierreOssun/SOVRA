@@ -5,7 +5,9 @@ use axum::Json;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sovra_eth::{PreparedTx, TxRequest, prepare_from_rpc};
+use utoipa::{OpenApi, ToSchema};
 
+#[utoipa::path(post, path = "/v1/prepare", request_body = PrepareRequest)]
 pub async fn prepare(
     State(state): State<AppState>,
     Json(body): Json<PrepareRequest>,
@@ -41,23 +43,37 @@ pub struct AppState {
     pub provider: DynProvider,
 }
 
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Default, Debug, ToSchema)]
 pub struct PrepareRequest {
+    #[schema(value_type = String)]
     from: Address,
+    #[schema(value_type = String)]
     to: Address,
+    #[schema(value_type = String, example = "0")]
     value: U256,
+    #[schema(value_type = String)]
     data: Bytes,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PrepareResponse {
+    #[schema(value_type = String)]
     signing_hash: B256,
+    #[schema(value_type = u64)]
     chain_id: ChainId,
+    #[schema(value_type = u64)]
     nonce: TxNonce,
     gas_limit: u64,
     max_fee_per_gas: u128,
     max_priority_fee_per_gas: u128,
+    #[schema(value_type = String)]
     to: Address,
+    #[schema(value_type = String, example = "0")]
     value: U256,
+    #[schema(value_type = String)]
     data: Bytes,
 }
+
+#[derive(OpenApi)]
+#[openapi(paths(prepare,), components(schemas(PrepareRequest, PrepareResponse),))]
+pub struct ApiDoc;

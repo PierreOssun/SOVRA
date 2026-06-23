@@ -12,3 +12,8 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 axum = { workspace = true }
 alloy-provider = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true, features = ["axum"] }
+
+[dev-dependencies]
+alloy-consensus = { workspace = true }

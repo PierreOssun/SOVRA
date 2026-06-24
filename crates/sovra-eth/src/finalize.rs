@@ -1,7 +1,8 @@
-use crate::{FinalizeError, PreparedTx, SignedTx};
 use alloy_consensus::{SignableTransaction, TxEnvelope};
 use alloy_network::eip2718::Encodable2718;
 use alloy_primitives::{Address, Signature, U256};
+
+use crate::{FinalizeError, PreparedTx, SignedTx};
 
 pub fn finalize_impl(
     prepared_tx: PreparedTx,
@@ -17,6 +18,7 @@ pub fn finalize_impl(
         .map_err(|_| FinalizeError::Recovery)?;
 
     if recovered != expected_from {
+        tracing::error!(expected = %expected_from, recovered = %recovered, "signer mismatch");
         return Err(FinalizeError::AddressMismatch {
             expected: expected_from,
             recovered,
@@ -34,6 +36,8 @@ pub fn finalize_impl(
 
     // serialize to raw EIP-2718 bytes (0x02…) for eth_sendRawTransaction
     let raw = envelope.encoded_2718().into();
+
+    tracing::info!(tx_hash = %tx_hash, from = %recovered, "tx finalized");
 
     Ok(SignedTx {
         raw,

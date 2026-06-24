@@ -7,6 +7,7 @@ edition = "2024"
 config = "0.15"
 serde = { version = "1", features = ["derive"] }
 sovra-eth = { workspace = true }
+sovra-observability = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
@@ -14,6 +15,7 @@ axum = { workspace = true }
 alloy-provider = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true, features = ["axum"] }
+tracing = "0.1.44"
 
 [dev-dependencies]
 alloy-consensus = { workspace = true }

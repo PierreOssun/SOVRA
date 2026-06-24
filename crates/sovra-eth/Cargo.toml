@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
 url = { workspace = true }
+tracing = "0.1.44"

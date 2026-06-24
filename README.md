@@ -2,7 +2,7 @@
 
 This repo showcases a 2-of-2 MPC signer.
 
-Prepares, signs, and broadcasts Ethereum transactions using threshold signatures (MPC) the key is never held by any single party.
+Prepares, signs, and broadcasts Ethereum transactions using threshold signatures (MPC).
 
 ## 1. Architecture
 

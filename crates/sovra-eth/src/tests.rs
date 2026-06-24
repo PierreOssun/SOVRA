@@ -1,14 +1,11 @@
-use crate::prepare::*;
-use crate::types::*;
-use crate::*;
-
-use alloy_consensus::private::alloy_eips::Decodable2718;
-use alloy_consensus::transaction::SignerRecoverable;
-use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_primitives::b256;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_consensus::{
+    Transaction, TxEnvelope, private::alloy_eips::Decodable2718, transaction::SignerRecoverable,
+};
+use alloy_primitives::{Address, Bytes, U256, b256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
+
+use crate::{prepare::*, types::*, *};
 
 #[test]
 fn returns_the_correct_prepared_tx() {

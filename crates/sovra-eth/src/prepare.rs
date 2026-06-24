@@ -1,9 +1,10 @@
-use crate::{EnrichError, PrepareError, PreparedTx, ProviderError, TxIntent, TxRequest};
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use url::Url;
+
+use crate::{EnrichError, PrepareError, PreparedTx, ProviderError, TxIntent, TxRequest};
 
 pub async fn prepare_from_rpc_impl<P: Provider>(
     req: TxRequest,
@@ -40,6 +41,8 @@ pub async fn enrich<P: Provider>(
     from: Address,
     provider: &P,
 ) -> Result<TxIntent, EnrichError> {
+    tracing::debug!(from = %from, "enriching tx from RPC");
+
     let eth_chain_id = provider.get_chain_id().await?;
     let nonce = provider.get_transaction_count(from).pending().await?;
     let fees = provider.estimate_eip1559_fees().await?;
@@ -53,6 +56,14 @@ pub async fn enrich<P: Provider>(
     };
 
     let gas_limit = provider.estimate_gas(tx_req).await?;
+
+    tracing::debug!(
+        chain_id = eth_chain_id,
+        nonce,
+        gas_limit,
+        max_fee = fees.max_fee_per_gas,
+        "enrichment complete"
+    );
 
     let tx_intent = TxIntent {
         chain_id: eth_chain_id,

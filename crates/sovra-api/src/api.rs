@@ -1,24 +1,31 @@
-use crate::errors::ApiError;
 use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, TxNonce, U256};
 use alloy_provider::DynProvider;
-use axum::Json;
-use axum::extract::State;
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use sovra_eth::{PreparedTx, TxRequest, prepare_from_rpc};
 use utoipa::{OpenApi, ToSchema};
+
+use crate::errors::ApiError;
 
 #[utoipa::path(post, path = "/v1/prepare", request_body = PrepareRequest)]
 pub async fn prepare(
     State(state): State<AppState>,
     Json(body): Json<PrepareRequest>,
 ) -> Result<Json<PrepareResponse>, ApiError> {
+    tracing::info!(from = %body.from, to = %body.to, value = %body.value, "prepare request");
+
     let req = TxRequest {
         to: body.to,
         value: body.value,
         data: body.data,
     };
 
-    let PreparedTx { tx, signing_hash } = prepare_from_rpc(req, body.from, &state.provider).await?;
+    let PreparedTx { tx, signing_hash } =
+        prepare_from_rpc(req, body.from, &state.provider)
+            .await
+            .inspect_err(|e| tracing::error!(err = %e, "prepare failed"))?;
+
+    tracing::info!(signing_hash = %signing_hash, nonce = tx.nonce, "prepare ok");
 
     let to = match tx.to {
         TxKind::Call(addr) => addr,

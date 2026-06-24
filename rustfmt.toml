@@ -1,0 +1,5 @@
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+max_width = 100
+trailing_comma = "Vertical"
+normalize_doc_attributes = true

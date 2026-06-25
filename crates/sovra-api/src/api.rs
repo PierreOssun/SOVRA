@@ -33,7 +33,7 @@ pub async fn prepare(
     };
 
     Ok(Json(PrepareResponse {
-        signing_hash: signing_hash,
+        signing_hash,
         chain_id: tx.chain_id,
         nonce: tx.nonce,
         gas_limit: tx.gas_limit,

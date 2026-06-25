@@ -2,6 +2,7 @@
 name = "sovra-api"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 config = "0.15"

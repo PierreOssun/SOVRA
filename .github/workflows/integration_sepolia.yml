@@ -1,0 +1,24 @@
+name: Integration (Sepolia)
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sepolia:
+    name: live Sepolia prepare
+    runs-on: ubuntu-latest
+    env:
+      # The test reads SEPOLIA_RPC_URL first, falling back to config/sepolia.
+      SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (ignored Sepolia test)
+        run: cargo test -p sovra-api --test sepolia_prepare -- --ignored

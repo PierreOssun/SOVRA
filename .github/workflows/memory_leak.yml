@@ -1,0 +1,44 @@
+name: Memory Leak
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo miri setup
+        run: cargo miri setup
+      - name: cargo miri test
+        run: cargo miri test --workspace
+
+  valgrind:
+    name: valgrind (leak-check=full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install cargo-valgrind
+        run: cargo install cargo-valgrind --locked
+      # cargo-valgrind runs every test binary under
+      # `valgrind --leak-check=full --error-exitcode=1`, so any leak
+      # (including Rc/Arc reference cycles reported as "definitely lost")
+      # fails the job. The #[ignore]d Sepolia test stays excluded (no network).
+      - name: cargo valgrind test
+        run: cargo valgrind test --workspace

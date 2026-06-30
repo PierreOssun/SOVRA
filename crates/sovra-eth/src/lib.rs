@@ -9,7 +9,7 @@ mod tests;
 
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
-pub use prepare::{http_provider, prepare_from_rpc_impl};
+pub use prepare::{http_provider, prepare, prepare_from_rpc_impl};
 pub use types::*;
 
 use crate::finalize::finalize_impl;

@@ -1,0 +1,19 @@
+[package]
+name = "sovra-mpc-dkls23-silence"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sovra-mpc = { workspace = true }
+sovra-types = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256"] }
+k256 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+rand = { workspace = true }
+derivation-path = { workspace = true }
+sl-dkls23 = { workspace = true, features = ["test-support"] }
+sl-mpc-mate = { workspace = true, features = ["simple-relay"] }
+
+[dev-dependencies]
+sovra-eth = { workspace = true }

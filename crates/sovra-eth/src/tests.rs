@@ -5,7 +5,7 @@ use alloy_primitives::{Address, Bytes, U256, b256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 
-use crate::{prepare::*, types::*, *};
+use crate::{encoding::*, prepare::*, types::*, *};
 
 #[test]
 fn returns_the_correct_prepared_tx() {
@@ -147,6 +147,63 @@ fn finalize_is_deterministic() {
 
     assert_eq!(f1.raw, f2.raw);
     assert_eq!(f1.tx_hash, f2.tx_hash);
+}
+
+#[test]
+fn decoding_roundtrip() {
+    let mut intent = base_intent();
+    intent.data = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
+    let prepared = prepare(intent).unwrap();
+
+    let raw = encode_unsigned(&prepared.tx);
+    let decoded = decode_unsigned(&raw).unwrap();
+
+    assert_eq!(decoded.tx, prepared.tx);
+    assert_eq!(decoded.signing_hash, prepared.signing_hash);
+}
+
+#[test]
+fn decode_rejects_unsupported_type() {
+    let prepared = prepare(base_intent()).unwrap();
+    let mut raw = encode_unsigned(&prepared.tx).to_vec();
+    raw[0] = 0x01;
+
+    assert!(matches!(
+        decode_unsigned(&raw).unwrap_err(),
+        DecodeError::UnsupportedType(0x01)
+    ));
+}
+
+#[test]
+fn decode_rejects_empty_input() {
+    assert!(matches!(
+        decode_unsigned(&[]).unwrap_err(),
+        DecodeError::Empty
+    ));
+}
+
+#[test]
+fn decode_rejects_trailing_bytes() {
+    let prepared = prepare(base_intent()).unwrap();
+    let mut raw = encode_unsigned(&prepared.tx).to_vec();
+    raw.push(0x00);
+
+    assert!(matches!(
+        decode_unsigned(&raw).unwrap_err(),
+        DecodeError::TrailingBytes
+    ));
+}
+
+#[test]
+fn decode_rejects_truncated_body() {
+    let prepared = prepare(base_intent()).unwrap();
+    let raw = encode_unsigned(&prepared.tx);
+    let truncated = &raw[..raw.len() - 1];
+
+    assert!(matches!(
+        decode_unsigned(truncated).unwrap_err(),
+        DecodeError::Rlp(_)
+    ));
 }
 
 fn base_intent() -> TxIntent {

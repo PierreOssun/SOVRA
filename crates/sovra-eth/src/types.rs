@@ -95,3 +95,14 @@ pub enum ProviderError {
     #[error("invalid RPC URL: {0}")]
     InvalidUrl(#[from] ParseError),
 }
+#[derive(Error, Debug)]
+pub enum DecodeError {
+    #[error("empty transaction bytes")]
+    Empty,
+    #[error("unsupported transaction type: {0:#04x}, expected 0x02 (EIP-1559)")]
+    UnsupportedType(u8),
+    #[error("invalid rlp encoding")]
+    Rlp(#[from] alloy_rlp::Error),
+    #[error("trailing bytes after transaction")]
+    TrailingBytes,
+}

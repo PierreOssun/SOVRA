@@ -23,7 +23,11 @@ jobs:
       - name: cargo miri setup
         run: cargo miri setup
       - name: cargo miri test
-        run: cargo miri test --workspace
+        # Miri interprets pure Rust only: the sovra-state tests need real
+        # filesystem syscalls (isolation forbids them) and the MPC/DKLs23
+        # tests are computationally infeasible under interpretation.
+        # Native leak coverage for those lives in the valgrind job below.
+        run: cargo miri test -p sovra-eth -p sovra-types -p sovra-mpc
 
   valgrind:
     name: valgrind (leak-check=full)

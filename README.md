@@ -41,10 +41,28 @@ Three transaction-lifecycle endpoints (`prepare`, `sign`, `broadcast`), plus ope
 ### `POST /v1/prepare`
 
 Build an unsigned EIP-1559 transaction from intent.
+Request: `{ to, value, data? }` (`data` defaults to `0x`).
+`from` is always the active DKG address (`409` if DKG has not run).
+
+Response: `{ from, unsigned_transaction, tx_digest }`.
+
+### `POST /v1/dkg`
+
+Operator endpoint. Runs the one-time DKG ceremony, persists one shard per party,
+and returns the derived signer address.
+Response: `{ address }`. A second call returns `409` — no key rotation in the PoC.
+
+### `GET /v1/dkg`
+
+Returns the active signer address (`{ address }`, or `404` if DKG has not run),
+so the operator can independently verify the derived address.
 
 ### `POST /v1/sign`
 
 Execute signing across both cosigners over the supplied unsigned transaction.
+Request: `{ unsigned_transaction }` — the `0x02…`-prefixed bytes from `prepare`
+
+Response: `{ signed_transaction, signature: { r, s, y_parity }, recovered_address, tx_digest }`.
 
 ### `POST /v1/broadcast`
 

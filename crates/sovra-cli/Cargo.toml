@@ -1,0 +1,12 @@
+[package]
+name = "sovra-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive", "env"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

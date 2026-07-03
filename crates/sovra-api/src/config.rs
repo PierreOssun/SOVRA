@@ -6,9 +6,21 @@ pub struct Config {
     pub rpc_url: String,
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
+    #[serde(default = "default_party0_dir")]
+    pub party0_dir: String,
+    #[serde(default = "default_party1_dir")]
+    pub party1_dir: String,
 }
 fn default_bind_addr() -> String {
     "127.0.0.1:3000".to_string()
+}
+
+fn default_party0_dir() -> String {
+    "data/party0".to_string()
+}
+
+fn default_party1_dir() -> String {
+    "data/party1".to_string()
 }
 
 impl Config {

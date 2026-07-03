@@ -16,24 +16,30 @@ pub async fn prepare_from_rpc_impl<P: Provider>(
 }
 
 pub fn prepare(intent: TxIntent) -> Result<PreparedTx, PrepareError> {
-    // Validate inputs
-    if intent.chain_id == 0 {
-        return Err(PrepareError::ZeroChainId);
-    }
-    if intent.gas_limit == 0 {
-        return Err(PrepareError::ZeroGasLimit);
-    }
-    if intent.max_priority_fee_per_gas > intent.max_fee_per_gas {
-        return Err(PrepareError::MaxPriorityFeeExceedsMaxFee);
-    }
-
     let eip1559_tx = TxEip1559::from(intent);
+    validate_unsigned(&eip1559_tx)?;
+
     let signing_hash = eip1559_tx.signature_hash();
 
     Ok(PreparedTx {
         tx: eip1559_tx,
         signing_hash,
     })
+}
+
+/// Invariants every transaction must satisfy before signing, whether it was
+/// built by `prepare` or supplied as raw bytes by a third party.
+pub fn validate_unsigned(tx: &TxEip1559) -> Result<(), PrepareError> {
+    if tx.chain_id == 0 {
+        return Err(PrepareError::ZeroChainId);
+    }
+    if tx.gas_limit == 0 {
+        return Err(PrepareError::ZeroGasLimit);
+    }
+    if tx.max_priority_fee_per_gas > tx.max_fee_per_gas {
+        return Err(PrepareError::MaxPriorityFeeExceedsMaxFee);
+    }
+    Ok(())
 }
 
 pub async fn enrich<P: Provider>(

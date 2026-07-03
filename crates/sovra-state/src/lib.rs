@@ -1,3 +1,4 @@
+#[cfg(test)]
 mod tests;
 mod types;
 
@@ -5,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_primitives::Address;
 use sovra_types::{KeyShare, SignerId, SignerMetadata};
-use types::*;
+pub use types::*;
 
 const METADATA_FILE: &str = "metadata.json";
 const SHARD_FILE: &str = "shard.bin";

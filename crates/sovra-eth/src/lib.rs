@@ -1,14 +1,16 @@
 mod types;
 
-mod prepare;
+pub mod prepare;
 
 mod finalize;
 
+mod encoding;
 #[cfg(test)]
 mod tests;
 
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
+pub use encoding::{decode_unsigned, encode_unsigned};
 pub use prepare::{http_provider, prepare, prepare_from_rpc_impl};
 pub use types::*;
 

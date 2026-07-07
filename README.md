@@ -1,4 +1,4 @@
-# 2-of-2 MPC Signer – DLKs23
+# 2-of-2 MPC Signer – DKLs23
 
 This repo showcases a 2-of-2 MPC signer.
 

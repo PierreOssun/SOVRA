@@ -110,6 +110,22 @@ impl SignerStore {
 
         Err(StateError::AddressNotFound(*address))
     }
+
+    /// Address of a FULLY persisted generation: metadata and shard must both exist.
+    /// save_shard writes metadata before the shard, so a crash between the two
+    /// leaves metadata-only — that half-state is an error, not a generation.
+    pub fn load_active(&self, id: &SignerId) -> Result<Option<Address>, StateError> {
+        let meta = match self.load_metadata(id) {
+            Ok(meta) => meta,
+            Err(StateError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        match self.load_shard(id) {
+            Ok(_) => Ok(Some(meta.address)),
+            Err(StateError::NotFound(_)) => Err(StateError::PartialState(meta.address)),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -133,7 +149,7 @@ fn read_or_not_found(path: &Path, id: &SignerId) -> Result<Vec<u8>, StateError> 
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
     let dir = path.parent().expect("file path must have a parent");
     let tmp = dir.join(format!(
         ".tmp-{}",

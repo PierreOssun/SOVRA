@@ -7,6 +7,9 @@
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 
+/// The single active DKG generation is always stored under this id.
+pub const ACTIVE_SIGNER_ID: &str = "default";
+
 /// Stable identifier for a provisioned signer (a cosigner pair).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SignerId(pub String);

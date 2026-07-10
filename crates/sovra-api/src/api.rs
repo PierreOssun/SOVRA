@@ -8,11 +8,11 @@ use sovra_eth::{
 use sovra_mpc::MpcBackend;
 use utoipa::{OpenApi, ToSchema};
 
-use crate::{errors::ApiError, orchestrator, state::AppState};
+use crate::{errors::ApiError, state::AppState};
 
 #[utoipa::path(post, path = "/v1/prepare", request_body = PrepareRequest)]
-pub async fn prepare(
-    State(state): State<AppState>,
+pub async fn prepare<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
     Json(body): Json<PrepareRequest>,
 ) -> Result<Json<PrepareResponse>, ApiError> {
     let from = state
@@ -42,7 +42,9 @@ pub async fn prepare(
 }
 
 #[utoipa::path(post, path = "/v1/dkg")]
-pub async fn dkg_create(State(state): State<AppState>) -> Result<Json<DkgResponse>, ApiError> {
+pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
+) -> Result<Json<DkgResponse>, ApiError> {
     let _op = state
         .signer
         .op
@@ -53,7 +55,7 @@ pub async fn dkg_create(State(state): State<AppState>) -> Result<Json<DkgRespons
         return Err(ApiError::DkgAlreadyInitialized);
     }
 
-    let address = orchestrator::run_dkg(&state.backend, &state.stores).await?;
+    let address = state.backend.dkg().await?;
     state.signer.state.write().unwrap().active = Some(address);
 
     tracing::info!(%address, "dkg complete");
@@ -61,15 +63,17 @@ pub async fn dkg_create(State(state): State<AppState>) -> Result<Json<DkgRespons
 }
 
 #[utoipa::path(get, path = "/v1/dkg")]
-pub async fn dkg_get(State(state): State<AppState>) -> Result<Json<DkgResponse>, ApiError> {
+pub async fn dkg_get<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
+) -> Result<Json<DkgResponse>, ApiError> {
     let active = state.signer.state.read().unwrap().active;
     active
         .map(|address| Json(DkgResponse { address }))
         .ok_or(ApiError::DkgNotFound)
 }
 #[utoipa::path(post, path = "/v1/sign", request_body = SignRequest)]
-pub async fn sign(
-    State(state): State<AppState>,
+pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
     Json(body): Json<SignRequest>,
 ) -> Result<Json<SignResponse>, ApiError> {
     // 1. Decode + recompute the digest. Never trust a caller-supplied hash.
@@ -101,8 +105,7 @@ pub async fn sign(
         return Ok(Json(cached.clone()));
     }
 
-    let shards = orchestrator::load_shards(&state.stores)?;
-    let parts = state.backend.sign(tx_digest, &shards).await?;
+    let parts = state.backend.sign(tx_digest).await?;
 
     // Load-bearing safety check: recovered signer must be the active address.
     let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, active)?;

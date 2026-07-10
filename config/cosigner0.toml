@@ -1,0 +1,4 @@
+party_id = 0
+bind_addr = "127.0.0.1:4100"
+data_dir = "data/cosigner0"
+relay_url = "ws://127.0.0.1:3100/ws"

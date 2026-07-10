@@ -1,5 +1,5 @@
 [package]
-name = "sovra-api"
+name = "sovra-cosigner"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -8,27 +8,21 @@ publish = false
 config = "0.15"
 serde = { version = "1", features = ["derive"] }
 sovra-ipc = { workspace = true }
-sovra-eth = { workspace = true }
-sovra-observability = { workspace = true }
 sovra-mpc = { workspace = true }
 sovra-mpc-dkls23-silence = { workspace = true }
+sovra-observability = { workspace = true }
 sovra-state = { workspace = true }
 sovra-types = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
-serde_json = { workspace = true }
 axum = { workspace = true }
-alloy-provider = { workspace = true }
-utoipa = { workspace = true }
-utoipa-swagger-ui = { workspace = true, features = ["axum"] }
-tracing = { workspace = true }
+ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-url = { workspace = true }
-reqwest = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-alloy-consensus = { workspace = true }
-tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
 tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }

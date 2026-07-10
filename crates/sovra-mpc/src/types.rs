@@ -1,30 +1,18 @@
 use alloy_primitives::{Address, B256, U256};
-use sovra_types::KeyShare;
 
 /// A 2-of-2 MPC backend: provisions key shares (DKG) and produces ECDSA
 /// signatures from a 32-byte signing hash.
 pub trait MpcBackend {
     /// Run a 2-of-2 distributed key generation.
-    fn dkg(&self) -> impl Future<Output = Result<DkgResult, MpcError>> + Send;
+    fn dkg(&self) -> impl Future<Output = Result<Address, MpcError>> + Send;
 
     /// Produce a signature over `signing_hash` using the provided shards.
-    fn sign(
-        &self,
-        signing_hash: B256,
-        shares: &[KeyShare],
-    ) -> impl Future<Output = Result<EcdsaParts, MpcError>> + Send;
-}
-
-/// Output of a distributed key generation: the per-party opaque shards plus the
-/// Ethereum address derived from the shared public key.
-#[derive(Debug, Clone)]
-pub struct DkgResult {
-    pub shares: Vec<KeyShare>,
-    pub address: Address,
+    fn sign(&self, signing_hash: B256)
+    -> impl Future<Output = Result<EcdsaParts, MpcError>> + Send;
 }
 
 /// ECDSA signature components
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EcdsaParts {
     pub r: U256,
     pub s: U256,
@@ -39,6 +27,8 @@ pub enum MpcError {
     Sign(String),
     #[error("could not deserialize a key share")]
     Deserialize,
-    #[error("signing produced no signature")]
-    NoSignature,
+    #[error("cosigner transport failed: {0}")]
+    Transport(String),
+    #[error("cosigners disagreed: {0}")]
+    PartyMismatch(String),
 }

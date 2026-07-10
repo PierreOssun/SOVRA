@@ -2,25 +2,31 @@ use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
-use sovra_mpc_dkls23_silence::SilenceBackend;
-use sovra_state::SignerStore;
+use sovra_mpc::MpcBackend;
 
 use crate::api::SignResponse;
 
-#[derive(Clone)]
-pub struct AppState {
+pub struct AppState<B> {
     pub provider: DynProvider,
-    pub backend: Arc<SilenceBackend>,
-    pub stores: Arc<[SignerStore; 2]>,
+    pub backend: Arc<B>,
     pub signer: Arc<SignerCell>,
 }
 
-impl AppState {
-    pub fn new(provider: DynProvider, stores: [SignerStore; 2], active: Option<Address>) -> Self {
+impl<B> Clone for AppState<B> {
+    fn clone(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            backend: self.backend.clone(),
+            signer: self.signer.clone(),
+        }
+    }
+}
+
+impl<B: MpcBackend> AppState<B> {
+    pub fn new(provider: DynProvider, backend: B, active: Option<Address>) -> Self {
         Self {
             provider,
-            backend: Arc::new(SilenceBackend),
-            stores: Arc::new(stores),
+            backend: Arc::new(backend),
             signer: Arc::new(SignerCell {
                 state: std::sync::RwLock::new(SignerState {
                     active,

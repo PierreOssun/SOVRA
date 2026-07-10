@@ -14,24 +14,24 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use sovra_api::{orchestrator, orchestrator::ACTIVE_SIGNER_ID, run::build_router, state::AppState};
+use sovra_api::{run::build_router, state::AppState};
 use sovra_eth::{TxIntent, encode_unsigned, prepare};
+use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
-use sovra_types::{KeyShare, SignerId, SignerMetadata};
+use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
 use tower::ServiceExt;
 
 fn test_router(dir0: &std::path::Path, dir1: &std::path::Path) -> Router {
     let stores = [
-        SignerStore::open(dir0).unwrap(),
-        SignerStore::open(dir1).unwrap(),
+        SignerStore::open(dir0).unwrap(), // context
+        SignerStore::open(dir1).unwrap(), // context
     ];
-    let active = orchestrator::recover_active(&stores).unwrap();
-    // Never contacted: dkg/sign don't touch the provider, and prepare isn't
-    // exercised here (it needs live RPC). Construction only parses the URL.
+    let backend = InProcessBackend::new(stores); // NEW: backend owns the stores now
+    let active = backend.recover_active().unwrap(); // was: orchestrator::recover_active(&stores)
     let provider = sovra_eth::http_provider("http://127.0.0.1:9")
         .unwrap()
         .erased();
-    build_router(AppState::new(provider, stores, active))
+    build_router(AppState::new(provider, backend, active)) // was: AppState::new(provider, stores, active)
 }
 
 fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -213,7 +213,7 @@ fn recover_rejects_metadata_without_shard() {
     // Simulate a crash between save_shard's metadata write and shard write.
     std::fs::remove_file(d1.path().join(ACTIVE_SIGNER_ID).join("shard.bin")).unwrap();
 
-    assert!(orchestrator::recover_active(&stores).is_err());
+    assert!(InProcessBackend::new(stores).recover_active().is_err());
 }
 
 #[tokio::test]
@@ -252,8 +252,8 @@ async fn server_errors_do_not_leak_paths() {
     let body = serde_json::json!({ "unsigned_transaction": raw.to_string() });
     let (status, resp) = call(&router, post_json("/v1/sign", body)).await;
 
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     let error = json(&resp)["error"].as_str().unwrap().to_string();
-    assert_eq!(error, "internal storage error");
+    assert_eq!(error, "mpc protocol failed");
     assert!(!error.contains(d1.path().to_str().unwrap()));
 }

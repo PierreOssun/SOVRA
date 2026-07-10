@@ -53,4 +53,8 @@ pub enum StateError {
     InvalidSignerId(SignerId),
     #[error("could not unseal shard")]
     Seal,
+    #[error(
+        "metadata for {0} present but shard missing; partial dkg persistence — wipe the store dir and re-run dkg"
+    )]
+    PartialState(Address),
 }

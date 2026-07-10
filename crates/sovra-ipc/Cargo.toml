@@ -1,0 +1,20 @@
+[package]
+name = "sovra-ipc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sovra-mpc = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "net", "time"] }
+futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true }
+sl-mpc-mate = { workspace = true, features = ["simple-relay"] }
+alloy-primitives = { workspace = true, features = ["serde"] }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }

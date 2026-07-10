@@ -58,6 +58,10 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal storage error".to_string(),
             ),
+            ApiError::Mpc(MpcError::PartyMismatch(_)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cosigner cross-check failed".to_string(), // a party is lying or misconfigured — not a gateway blip
+            ),
             ApiError::Mpc(_) => (StatusCode::BAD_GATEWAY, "mpc protocol failed".to_string()),
             ApiError::Finalize(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,

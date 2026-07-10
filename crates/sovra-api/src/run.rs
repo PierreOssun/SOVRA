@@ -1,38 +1,54 @@
+use std::time::Duration;
+
+use alloy_primitives::Address;
 use alloy_provider::Provider;
 use axum::{Router, response::Response, routing::post};
 use sovra_eth::http_provider;
-use sovra_state::SignerStore;
+use sovra_ipc::{hub::RelayHub, remote::RemoteBackend};
+use sovra_mpc::MpcBackend;
+use url::Url;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{api, api::ApiDoc, config::Config, orchestrator, state::AppState};
+use crate::{
+    api, api::ApiDoc, config::Config, orchestrator, orchestrator::RecoverError, state::AppState,
+};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
     let provider = http_provider(&config.rpc_url)?.erased();
-    let stores = [
-        SignerStore::open(&config.party0_dir)?,
-        SignerStore::open(&config.party1_dir)?,
-    ];
+    let cosigners: [Url; 2] = [config.cosigner0_url.parse()?, config.cosigner1_url.parse()?];
 
-    let active = orchestrator::recover_active(&stores)?;
+    // Hub up FIRST — cosigners dial it mid-run; it must exist before any dkg/sign.
+    let relay_listener = tokio::net::TcpListener::bind(&config.relay_bind).await?;
+    let hub = sovra_ipc::hub::ws_router(RelayHub::default());
+    tracing::info!("relay hub on {}", config.relay_bind);
+
+    // Bounded retry: cosigners start first (RUN.md), but give them ~10s of grace.
+    let probe = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let active = recover_with_retry(&probe, &cosigners).await?;
     if let Some(address) = active {
         tracing::info!(%address, "recovered active dkg generation");
     }
-    let state = AppState::new(provider, stores, active);
 
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-
+    let state = AppState::new(
+        provider,
+        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone()),
+        active,
+    );
+    let api_listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("listening on {}", config.bind_addr);
 
-    axum::serve(listener, app).await?;
-
+    tokio::try_join!(
+        async { axum::serve(api_listener, build_router(state)).await },
+        async { axum::serve(relay_listener, hub).await },
+    )?;
     Ok(())
 }
 
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router<B: MpcBackend + Send + Sync + 'static>(state: AppState<B>) -> Router {
     Router::new()
         .route("/v1/dkg", post(api::dkg_create).get(api::dkg_get))
         .route("/v1/prepare", post(api::prepare))
@@ -50,5 +66,26 @@ async fn correlation(req: axum::extract::Request, next: axum::middleware::Next) 
         method = %req.method(),
         path = %req.uri().path(),
     );
-    tracing::Instrument::instrument(next.run(req), span).await
+    sovra_ipc::control::CORRELATION_ID
+        .scope(
+            correlation_id,
+            tracing::Instrument::instrument(next.run(req), span),
+        ) // NEW wrapper
+        .await
+}
+
+async fn recover_with_retry(
+    http: &reqwest::Client,
+    cosigners: &[Url; 2],
+) -> Result<Option<Address>, RecoverError> {
+    for _ in 0..9 {
+        match orchestrator::recover_active(http, cosigners).await {
+            Err(RecoverError::Transport(e)) => {
+                tracing::warn!(error = %e, "cosigners not ready, retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            other => return other,
+        }
+    }
+    orchestrator::recover_active(http, cosigners).await
 }

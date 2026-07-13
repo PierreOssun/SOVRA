@@ -16,6 +16,7 @@ sovra-state = { path = "crates/sovra-state" }
 sovra-mpc = { path = "crates/sovra-mpc" }
 sovra-mpc-dkls23-silence = { path = "crates/sovra-mpc-dkls23-silence" }
 sovra-ipc = { path = "crates/sovra-ipc" }
+sovra-cosigner = { path = "crates/sovra-cosigner" }
 alloy-consensus = "2.0.5"
 alloy-primitives = "1.6.0"
 alloy-provider = "2.1.0"

@@ -4,3 +4,4 @@ data/**
 **/target/
 .idea/
 crates/*/Cargo.lock
+.DS_Store

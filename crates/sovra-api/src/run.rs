@@ -70,7 +70,7 @@ async fn correlation(req: axum::extract::Request, next: axum::middleware::Next) 
         .scope(
             correlation_id,
             tracing::Instrument::instrument(next.run(req), span),
-        ) // NEW wrapper
+        )
         .await
 }
 

@@ -1,76 +1,34 @@
 //! End-to-end API flow over the in-process router — no network, no RPC:
 //! dkg lifecycle, content-addressed signing, idempotency, restart recovery.
 
-use std::str::FromStr;
+mod test_helpers;
+use std::{str::FromStr, time::Duration};
 
 use alloy_consensus::{
     TxEip1559, TxEnvelope, private::alloy_eips::Decodable2718, transaction::SignerRecoverable,
 };
-use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
+use alloy_primitives::{Address, B256, Bytes, TxKind};
 use alloy_provider::Provider;
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode},
-};
-use http_body_util::BodyExt;
+use axum::{Router, http::StatusCode};
 use sovra_api::{run::build_router, state::AppState};
-use sovra_eth::{TxIntent, encode_unsigned, prepare};
+use sovra_eth::encode_unsigned;
+use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
 use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
 use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
-use tower::ServiceExt;
+use test_helpers::*;
 
 fn test_router(dir0: &std::path::Path, dir1: &std::path::Path) -> Router {
     let stores = [
-        SignerStore::open(dir0).unwrap(), // context
-        SignerStore::open(dir1).unwrap(), // context
+        SignerStore::open(dir0).unwrap(),
+        SignerStore::open(dir1).unwrap(),
     ];
-    let backend = InProcessBackend::new(stores); // NEW: backend owns the stores now
-    let active = backend.recover_active().unwrap(); // was: orchestrator::recover_active(&stores)
+    let backend = InProcessBackend::new(stores);
+    let active = backend.recover_active().unwrap();
     let provider = sovra_eth::http_provider("http://127.0.0.1:9")
         .unwrap()
         .erased();
-    build_router(AppState::new(provider, backend, active)) // was: AppState::new(provider, stores, active)
-}
-
-fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-fn get(uri: &str) -> Request<Body> {
-    Request::builder().uri(uri).body(Body::empty()).unwrap()
-}
-
-async fn call(router: &Router, req: Request<Body>) -> (StatusCode, bytes::Bytes) {
-    let resp = router.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, body)
-}
-
-fn json(body: &[u8]) -> serde_json::Value {
-    serde_json::from_slice(body).unwrap()
-}
-
-fn unsigned_tx() -> (Bytes, alloy_primitives::B256) {
-    let prepared = prepare(TxIntent {
-        chain_id: 11155111,
-        nonce: 0,
-        to: Address::from([0x11; 20]),
-        value: U256::from(1_000_000_000u64),
-        gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
-        data: Default::default(),
-    })
-    .unwrap();
-    (encode_unsigned(&prepared.tx), prepared.signing_hash)
+    build_router(AppState::new(provider, backend, active))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -82,10 +40,10 @@ async fn dkg_lifecycle() {
     let (status, _) = call(&router, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (raw, _) = unsigned_tx();
+    let (raw, _) = unsigned_tx(1_000_000_000u64);
     let body = serde_json::json!({ "unsigned_transaction": raw.to_string() });
     let (status, _) = call(&router, post_json("/v1/sign", body)).await;
-    assert_eq!(status, StatusCode::CONFLICT); // dkg not initialized
+    assert_eq!(status, StatusCode::CONFLICT);
 
     // Provision.
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
@@ -110,7 +68,7 @@ async fn sign_flow_and_idempotency() {
     assert_eq!(status, StatusCode::OK);
     let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
 
-    let (raw, expected_digest) = unsigned_tx();
+    let (raw, expected_digest) = unsigned_tx(1_000_000_000u64);
     let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
 
     let (status, body) = call(&router, post_json("/v1/sign", req.clone())).await;
@@ -143,7 +101,7 @@ async fn sign_rejects_invalid_bytes() {
     let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let router = test_router(d0.path(), d1.path());
 
-    let (raw, _) = unsigned_tx();
+    let (raw, _) = unsigned_tx(1_000_000_000u64);
     let mut wrong_type = raw.to_vec();
     wrong_type[0] = 0x01;
     let mut trailing = raw.to_vec();
@@ -177,7 +135,7 @@ async fn restart_recovers_active_generation() {
     assert_eq!(json(&body)["address"].as_str().unwrap(), address);
 
     // The reloaded shards actually sign.
-    let (raw, _) = unsigned_tx();
+    let (raw, _) = unsigned_tx(1_000_000_000u64);
     let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
     let (status, _) = call(&router, post_json("/v1/sign", req)).await;
     assert_eq!(status, StatusCode::OK);
@@ -248,7 +206,7 @@ async fn server_errors_do_not_leak_paths() {
     // Break party 1's storage after provisioning.
     std::fs::remove_file(d1.path().join(ACTIVE_SIGNER_ID).join("shard.bin")).unwrap();
 
-    let (raw, _) = unsigned_tx();
+    let (raw, _) = unsigned_tx(1_000_000_000u64);
     let body = serde_json::json!({ "unsigned_transaction": raw.to_string() });
     let (status, resp) = call(&router, post_json("/v1/sign", body)).await;
 
@@ -256,4 +214,53 @@ async fn server_errors_do_not_leak_paths() {
     let error = json(&resp)["error"].as_str().unwrap().to_string();
     assert_eq!(error, "mpc protocol failed");
     assert!(!error.contains(d1.path().to_str().unwrap()));
+}
+
+// Delegation, not fakery: the winner gets a real signature back, so it passes
+// finalize's recovered-address check — clean {200, 409}, no accidental 500.
+struct SlowBackend(InProcessBackend);
+
+impl MpcBackend for SlowBackend {
+    async fn dkg(&self) -> Result<Address, MpcError> {
+        self.0.dkg().await
+    }
+    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+        tokio::time::sleep(Duration::from_millis(300)).await; // widen the race window
+        self.0.sign(signing_hash).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_signs_one_wins_one_conflicts() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let stores = [
+        SignerStore::open(d0.path()).unwrap(),
+        SignerStore::open(d1.path()).unwrap(),
+    ];
+    let provider = sovra_eth::http_provider("http://127.0.0.1:9")
+        .unwrap()
+        .erased();
+    let router = build_router(AppState::new(
+        provider,
+        SlowBackend(InProcessBackend::new(stores)),
+        None,
+    ));
+
+    let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // two DIFFERENT digests — the same digest could resolve through the
+    // idempotency cache instead of the op lock, which is what's under test
+    let (raw_a, _) = unsigned_tx(1_000_000_000);
+    let (raw_b, _) = unsigned_tx(2_000_000_000);
+    let req_a = serde_json::json!({ "unsigned_transaction": raw_a.to_string() });
+    let req_b = serde_json::json!({ "unsigned_transaction": raw_b.to_string() });
+
+    let (a, b) = tokio::join!(
+        call(&router, post_json("/v1/sign", req_a)),
+        call(&router, post_json("/v1/sign", req_b)),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]); // 200 < 409
 }

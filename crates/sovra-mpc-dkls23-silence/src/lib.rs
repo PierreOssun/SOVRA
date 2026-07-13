@@ -6,6 +6,7 @@
 //! * `InProcessBackend` — runs *both* parties in one process; test-only, holds both shards,
 //!   pins the HTTP contract in `sovra-api/tests/api_flow.rs`.
 
+#[cfg(test)]
 mod tests;
 pub mod types;
 

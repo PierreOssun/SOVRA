@@ -24,16 +24,13 @@ async fn dkg_sign_finalize_roundtrip() {
         SignerStore::open(dir.path().join("party1")).expect("store 1"),
     ]);
 
-    let address = backend.dkg().await.expect("dkg"); // NEW: Address, no more .shares
+    let address = backend.dkg().await.expect("dkg");
 
-    let prepared = prepare(base_intent()).expect("prepare"); // context
+    let prepared = prepare(base_intent()).expect("prepare");
 
-    let parts = backend
-        .sign(prepared.signing_hash) // NEW: shares param gone (custody moved)
-        .await
-        .expect("sign");
+    let parts = backend.sign(prepared.signing_hash).await.expect("sign");
 
-    let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, address).expect("finalize"); // dkg.address -> address
+    let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, address).expect("finalize");
 
-    assert_eq!(signed.from, address); // dkg.address -> address
+    assert_eq!(signed.from, address);
 }

@@ -24,7 +24,7 @@ pub async fn dkg(
     }
     let ctx = state.ctx(req.instance)?;
     let relay = WsRelay::connect(&state.relay_url).await?; // dial per run, 502 on refusal
-    let (share, address) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay)) // was: keygen_party(&ctx, relay).await?
+    let (share, address) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay))
         .await
         .map_err(|_| CosignerError::RunTimeout)??;
     state.store.save_shard(
@@ -34,8 +34,6 @@ pub async fn dkg(
         },
         &share,
     )?;
-    // The address is self-derived from our own shard — the orchestrator
-    // cross-checks it against the peer's answer.
     Ok(Json(SignerInfo { address }))
 }
 
@@ -51,7 +49,9 @@ pub async fn sign(
     };
     let ctx = state.ctx(req.instance)?;
     let relay = WsRelay::connect(&state.relay_url).await?;
-    let parts = sign_party(&ctx, &share, req.tx_digest, relay).await?;
+    let parts = tokio::time::timeout(state.ttl, sign_party(&ctx, &share, req.tx_digest, relay))
+        .await
+        .map_err(|_| CosignerError::RunTimeout)??;
     Ok(Json(parts.into()))
 }
 

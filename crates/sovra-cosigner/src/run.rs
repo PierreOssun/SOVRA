@@ -1,3 +1,14 @@
+//! Process wiring for the cosigner binary: config (`argv[1]`) → identity →
+//! pinned peer key → shard store → `CosignerState` → serve the control API.
+//!
+//! Choices worth knowing: the verifying key is logged on every start because
+//! pinning it in the peer's config is a manual operator step; a missing peer
+//! key is a warning at startup but a 409 at use, so a half-configured
+//! cosigner still serves `/identity` (needed to bootstrap the pairing).
+//! The correlation middleware differs from sovra-api's on purpose — this end
+//! ACCEPTS the incoming id so one id threads through all processes' logs.
+//! Pattern: composition root for the cosigner process.
+
 use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::{

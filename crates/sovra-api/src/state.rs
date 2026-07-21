@@ -1,3 +1,14 @@
+//! Shared per-process state handed to every handler via axum `State`.
+//!
+//! Two locks with distinct jobs: `state` is a `std::sync::RwLock` for cheap
+//! synchronous reads (guards must never be held across an `.await`), while
+//! `op` is a `tokio::sync::Mutex` used with `try_lock` only — it encodes
+//! "at most one MPC operation in flight", and busy callers get 409 rather
+//! than queueing behind a 60s protocol run. `Clone` is implemented by hand
+//! because deriving would wrongly require `B: Clone` (the backend is shared
+//! through the `Arc`). Everything here is in-memory and rebuilt at startup.
+//! Pattern: shared-state cell (Arc + interior mutability), standard axum.
+
 use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::{Address, B256};

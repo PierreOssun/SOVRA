@@ -1,3 +1,11 @@
+//! Support types for the store: the [`ShardSealer`] strategy trait (with the
+//! identity [`Passthrough`] impl), the crate error enum, and [`IoResultExt`]
+//! — a small extension that stamps every `io::Error` with the path it
+//! happened at, because a bare "permission denied" from a store with several
+//! files per signer is undebuggable. Errors carry operator remedies where
+//! one exists (see `PartialState`). Pattern: strategy trait for sealing;
+//! extension trait for error context.
+
 use std::path::{Path, PathBuf};
 
 use alloy_primitives::Address;

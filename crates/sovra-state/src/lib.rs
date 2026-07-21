@@ -1,3 +1,18 @@
+//! One MPC party's on-disk persistence: a single key shard (`shard.bin`)
+//! plus public metadata (`metadata.json`) per signer id, under
+//! `<root>/<signer_id>/`.
+//!
+//! Why this shape: metadata is plaintext JSON because the address is public;
+//! shard bytes route through the [`ShardSealer`] seam (identity `Passthrough`
+//! today, encryption later) so at-rest protection can change without touching
+//! callers. All writes are atomic (temp file + rename) with 0600/0700 modes,
+//! and metadata is written before the shard — which is why `load_active`
+//! treats metadata-without-shard as a distinct `PartialState` error instead
+//! of "not found": it's crash evidence, and the operator must decide.
+//! Signer ids are path-checked to prevent traversal. Knows nothing about MPC
+//! or HTTP. Pattern: repository over the filesystem, with a strategy seam
+//! for sealing.
+
 #[cfg(test)]
 mod tests;
 mod types;

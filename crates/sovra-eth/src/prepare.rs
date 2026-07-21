@@ -1,3 +1,14 @@
+//! Build an unsigned EIP-1559 tx: `enrich` pulls chain id, pending nonce,
+//! fee estimates, and gas limit from the RPC node; `prepare` turns the
+//! resulting `TxIntent` into a validated `TxEip1559` + signing hash.
+//!
+//! Why the enrich/prepare split: `prepare` is pure and exhaustively
+//! unit-testable, while `enrich` is the only RPC-touching step — and it's
+//! generic over `Provider` so tests substitute a mock transport.
+//! `validate_unsigned` is public because the same invariants must hold for
+//! transactions supplied as raw bytes by callers, not just ones built here.
+//! Pattern: functional core, imperative shell.
+
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};

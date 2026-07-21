@@ -1,3 +1,14 @@
+//! Domain types for the tx lifecycle — one struct per stage (`TxRequest` →
+//! `TxIntent` → `PreparedTx` → `SignedTx`) — plus one error enum per
+//! fallible step.
+//!
+//! Why a struct per stage instead of one mutable builder: each type can only
+//! exist if the previous stage succeeded, so "prepared but not validated" or
+//! "signed but unverified" states are unrepresentable. Per-step error enums
+//! keep the API layer able to map failures to distinct HTTP statuses.
+//! Pattern: typestate-flavored pipeline (make invalid states
+//! unrepresentable).
+
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, TxNonce, U256};
 use alloy_transport::TransportError;

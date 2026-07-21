@@ -1,3 +1,13 @@
+//! The single API error type and its mapping to HTTP responses.
+//!
+//! Why one enum with `#[from]` conversions: handlers use `?` on every domain
+//! error (`sovra-eth`, `sovra-mpc`, `sovra-state`) and exactly one place —
+//! `IntoResponse` here — decides the status code and what a client may see.
+//! Server-side errors return a generic message and log the detail, so
+//! internals never leak through the API. Status philosophy: caller mistakes →
+//! 4xx, cosigner/RPC failures → 502, broken invariants (cross-check,
+//! finalize, storage) → 500. Pattern: error facade at the HTTP boundary.
+
 use axum::{
     Json,
     http::StatusCode,

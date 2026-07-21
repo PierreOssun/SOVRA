@@ -1,3 +1,14 @@
+//! Shared per-process state (`CosignerState`) and the [`CosignerState::ctx`]
+//! constructor that assembles a `PartyContext` for each MPC run.
+//!
+//! `op` mirrors sovra-api's exclusivity mutex: `try_lock` only, at most one
+//! MPC run at a time, busy = 409. `ctx` is the one place the positional
+//! `party_vks` array is built (own key at `party_id`, peer at the other
+//! slot) — order is a protocol invariant, so it's centralized rather than
+//! rebuilt in each handler. State is immutable after startup except the
+//! store's on-disk contents; no locks needed beyond `op`.
+//! Pattern: shared-state cell, standard axum.
+
 use std::time::Duration;
 
 use alloy_primitives::B256;

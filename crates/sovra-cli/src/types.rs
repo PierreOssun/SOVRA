@@ -1,3 +1,13 @@
+//! clap definitions for the CLI surface: [`Cli`] (global `--api-url` /
+//! `SOVRA_API_URL`) and one [`Command`] variant per orchestrator endpoint.
+//!
+//! Kept apart from `main.rs` so the argument surface is readable in one
+//! screen, separate from the HTTP mechanics. Arguments use alloy types
+//! (`Address`, `U256`, `Bytes`) directly — clap's `FromStr` path gives
+//! parsing and error messages for free, and malformed input dies before any
+//! request is sent. Doc comments double as `--help` text.
+//! Pattern: declarative CLI (derive), types-as-validation at the edge.
+
 use alloy_primitives::{Address, Bytes, U256};
 use clap::{Parser, Subcommand};
 

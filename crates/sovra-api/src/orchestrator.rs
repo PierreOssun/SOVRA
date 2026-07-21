@@ -1,3 +1,12 @@
+//! Startup recovery: rebuild the in-memory "active address" from the
+//! cosigners' shard stores, since the orchestrator persists nothing itself.
+//!
+//! Why probe both and compare: after a crash mid-DKG the two stores can
+//! disagree (one shard written, one not). Serving with a half-provisioned key
+//! would be unsound, so disagreement refuses startup with an operator-facing
+//! remedy instead of guessing. Both 404 → fresh install; same address →
+//! recovered. Pattern: fail-fast startup gate.
+
 use alloy_primitives::Address;
 use sovra_ipc::remote::fetch_signer;
 use url::Url;

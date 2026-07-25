@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+sovra-cosigner = { workspace = true }
+alloy-primitives = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }

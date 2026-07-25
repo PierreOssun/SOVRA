@@ -1,0 +1,9 @@
+[alias]
+# `cargo xtask up` / `cargo xtask down` — the cargo-xtask pattern: build tooling
+# lives in a normal workspace crate, invoked through this alias (make/just, in Rust).
+xtask = "run --package xtask --"
+# Pre-commit gate: fmt, taplo, clippy -D warnings, tests, cargo-deny — the same
+# checks as .github/workflows/build_check.yml, stopping at the first failure.
+# (An alias can only hold ONE cargo command — the && chaining lives in xtask's
+# `ci` subcommand.)
+ci-check = "run --package xtask -- ci"

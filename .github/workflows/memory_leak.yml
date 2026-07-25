@@ -26,12 +26,14 @@ jobs:
         # Miri interprets pure Rust only: the sovra-state tests need real
         # filesystem syscalls (isolation forbids them) and the MPC/DKLs23
         # tests are computationally infeasible under interpretation.
-        # Native leak coverage for those lives in the valgrind job below.
+        # Native leak coverage for the non-MPC crates lives in the valgrind
+        # job below; the DKLs23-driving crates have their own manual job.
         run: cargo miri test -p sovra-eth -p sovra-types -p sovra-mpc
 
   valgrind:
     name: valgrind (leak-check=full)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -44,5 +46,33 @@ jobs:
       # `valgrind --leak-check=full --error-exitcode=1`, so any leak
       # (including Rc/Arc reference cycles reported as "definitely lost")
       # fails the job. The #[ignore]d Sepolia test stays excluded (no network).
+      #
+      # The three crates whose tests drive real DKLs23 rounds are excluded:
+      # a single DKG is seconds natively but ~20-50x slower under valgrind,
+      # which times the job out. Their leak coverage lives in the manual
+      # valgrind-mpc job below.
       - name: cargo valgrind test
-        run: cargo valgrind test --workspace
+        run: >
+          cargo valgrind test --workspace
+          --exclude sovra-api
+          --exclude sovra-cosigner
+          --exclude sovra-mpc-dkls23-silence
+
+  # Full-leak-check over the DKLs23-driving crates. Too slow to block PRs
+  # (each MPC round is minutes under valgrind), so it runs on demand only:
+  # gh workflow run memory_leak.yml   (or the Actions "Run workflow" button).
+  valgrind-mpc:
+    name: valgrind MPC (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install cargo-valgrind
+        run: cargo install cargo-valgrind --locked
+      - name: cargo valgrind test (MPC crates)
+        run: cargo valgrind test -p sovra-mpc-dkls23-silence -p sovra-cosigner -p sovra-api

@@ -36,15 +36,32 @@ pub enum CosignerError {
     Identity(String), // 500
     #[error("mpc run timed out; peer never joined or stalled mid-run")]
     RunTimeout, // 502
+    #[error("transaction rejected by policy: {0}")]
+    Policy(#[from] crate::policy::PolicyReject), // 403 + machine-readable code
+    #[error("unsigned transaction is malformed: {0}")]
+    BadTransaction(String), // 422
 }
 
 impl IntoResponse for CosignerError {
     fn into_response(self) -> Response {
         use CosignerError::*;
+        // Policy rejections additionally carry a stable machine-readable code
+        // so callers (and the demo) can distinguish WHY the cosigner refused
+        // without parsing prose.
+        if let Policy(reject) = &self {
+            tracing::warn!(code = reject.code(), error = %self, "policy rejected signing request");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": self.to_string(), "code": reject.code() })),
+            )
+                .into_response();
+        }
         let (status, message) = match &self {
             Busy | ShardExists | NoShard | PeerKeyUnset => (StatusCode::CONFLICT, self.to_string()),
             NoSigner => (StatusCode::NOT_FOUND, self.to_string()),
+            BadTransaction(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Relay(_) | Mpc(_) | RunTimeout => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Policy(_) => unreachable!("handled above"),
             State(_) | Identity(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal storage error".to_string(),

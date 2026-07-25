@@ -224,9 +224,13 @@ impl MpcBackend for SlowBackend {
     async fn dkg(&self) -> Result<Address, MpcError> {
         self.0.dkg().await
     }
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    async fn sign(
+        &self,
+        unsigned_tx: alloy_primitives::Bytes,
+        signing_hash: B256,
+    ) -> Result<EcdsaParts, MpcError> {
         tokio::time::sleep(Duration::from_millis(300)).await; // widen the race window
-        self.0.sign(signing_hash).await
+        self.0.sign(unsigned_tx, signing_hash).await
     }
 }
 

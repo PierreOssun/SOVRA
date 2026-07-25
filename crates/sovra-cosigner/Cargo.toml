@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 config = "0.15"
 serde = { version = "1", features = ["derive"] }
+alloy-consensus = { workspace = true }
+sovra-eth = { workspace = true }
 sovra-ipc = { workspace = true }
 sovra-mpc = { workspace = true }
 sovra-mpc-dkls23-silence = { workspace = true }

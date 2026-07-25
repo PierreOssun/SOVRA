@@ -16,7 +16,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use sovra_mpc_dkls23_silence::types::PartyContext;
 use sovra_state::SignerStore;
 
-use crate::errors::CosignerError;
+use crate::{errors::CosignerError, policy::Policy};
 
 pub struct CosignerState {
     pub party_id: u8,
@@ -26,6 +26,9 @@ pub struct CosignerState {
     pub relay_url: String,
     pub ttl: Duration,
     pub op: tokio::sync::Mutex<()>,
+    /// Spending policy this cosigner enforces before signing. `None` = no
+    /// policy granted = sign nothing (fail closed).
+    pub policy: Option<Policy>,
 }
 
 impl CosignerState {

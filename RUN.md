@@ -21,6 +21,9 @@ cargo xtask down
 
 Local only. To run the processes individually, see the sections below.
 
+Signing is bounded by each cosigner's `[policy]` section (recipients, max
+value, chains — fail closed if absent): see [SET_POLICY.md](SET_POLICY.md).
+
 ### Driving the system (prepare / sign)
 
 Once `cargo xtask up` reports the DKG address, the system is sign-ready. Drive it

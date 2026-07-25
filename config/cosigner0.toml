@@ -2,3 +2,10 @@ party_id = 0
 bind_addr = "127.0.0.1:4100"
 data_dir = "data/cosigner0"
 relay_url = "ws://127.0.0.1:3100/ws"
+
+# Spending policy — the authority ceiling this cosigner enforces before every
+# signature. Absent section = sign nothing (fail closed).
+[policy]
+allowed_recipients = ["0x000000000000000000000000000000000000dEaD"]
+max_value_wei = "10000000000000000"                                 # 0.01 ETH
+allowed_chain_ids = [11155111]                                      # Sepolia

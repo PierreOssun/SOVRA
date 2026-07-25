@@ -55,6 +55,24 @@ pub async fn sign(
     State(state): State<Arc<CosignerState>>,
     Json(req): Json<StartSignRequest>,
 ) -> Result<Json<SignParts>, CosignerError> {
+    // 1. Decode the raw payload and derive the digest OURSELVES — the wire
+    //    deliberately carries no digest (see StartSignRequest). A cosigner
+    //    that signs what it decoded can never be made to sign what it didn't.
+    let prepared = sovra_eth::decode_unsigned(&req.unsigned_transaction)
+        .map_err(|e| CosignerError::BadTransaction(e.to_string()))?;
+    sovra_eth::prepare::validate_unsigned(&prepared.tx)
+        .map_err(|e| CosignerError::BadTransaction(e.to_string()))?;
+
+    // 2. Policy gate, fail closed — no [policy] means no signatures. Runs
+    //    before the op lock and before any relay dial: a rejected request
+    //    must leave zero cryptographic footprint.
+    let policy = state
+        .policy
+        .as_ref()
+        .ok_or(crate::policy::PolicyReject::NoPolicyConfigured)?;
+    policy.check_tx(&prepared.tx)?;
+
+    // 3. Only now: exclusivity, shard, MPC — unchanged from before.
     let _op = state.op.try_lock().map_err(|_| CosignerError::Busy)?;
     let share = match state.store.load_shard(&SignerId::new(ACTIVE_SIGNER_ID)) {
         Ok(s) => s,
@@ -63,9 +81,12 @@ pub async fn sign(
     };
     let ctx = state.ctx(req.instance)?;
     let relay = WsRelay::connect(&state.relay_url).await?;
-    let parts = tokio::time::timeout(state.ttl, sign_party(&ctx, &share, req.tx_digest, relay))
-        .await
-        .map_err(|_| CosignerError::RunTimeout)??;
+    let parts = tokio::time::timeout(
+        state.ttl,
+        sign_party(&ctx, &share, prepared.signing_hash, relay),
+    )
+    .await
+    .map_err(|_| CosignerError::RunTimeout)??;
     Ok(Json(parts.into()))
 }
 

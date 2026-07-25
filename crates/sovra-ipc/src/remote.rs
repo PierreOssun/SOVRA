@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use reqwest::StatusCode;
 use serde::{Serialize, de::DeserializeOwned};
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
@@ -49,10 +49,13 @@ impl MpcBackend for RemoteBackend {
             .map(|i| i.address)
     }
 
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    // `signing_hash` is intentionally unused: cosigners must derive the digest
+    // from the payload themselves (see StartSignRequest) — sending it would
+    // reintroduce blind signing.
+    async fn sign(&self, unsigned_tx: Bytes, _signing_hash: B256) -> Result<EcdsaParts, MpcError> {
         let req = StartSignRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
-            tx_digest: signing_hash,
+            unsigned_transaction: unsigned_tx,
         };
         self.broadcast::<_, SignParts>("sign", &req)
             .await
@@ -113,6 +116,19 @@ impl RemoteBackend {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            // 403 = the cosigner's policy said no. Preserve its verdict
+            // (message + machine-readable code) instead of flattening it
+            // into a transport error — the refusal IS the product.
+            if status == StatusCode::FORBIDDEN {
+                let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                return Err(MpcError::Refused {
+                    code: body["code"].as_str().unwrap_or("policy_rejected").into(),
+                    message: body["error"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("cosigner{party} refused: {text}")),
+                });
+            }
             return Err(MpcError::Transport(format!(
                 "cosigner{party} {path}: {status}: {text}"
             )));

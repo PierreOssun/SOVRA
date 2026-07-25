@@ -4333,6 +4333,7 @@ dependencies = [
 name = "sovra-cosigner"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "axum",
  "config",
@@ -4341,6 +4342,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sovra-eth",
  "sovra-ipc",
  "sovra-mpc",
  "sovra-mpc-dkls23-silence",
@@ -4382,6 +4384,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest",
  "serde",
+ "serde_json",
  "sl-mpc-mate",
  "sovra-mpc",
  "thiserror 2.0.18",

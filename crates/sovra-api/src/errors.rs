@@ -50,6 +50,16 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // A cosigner policy refusal is a first-class outcome, not a gateway
+        // failure: pass its message and machine-readable code through as 403.
+        if let ApiError::Mpc(MpcError::Refused { code, message }) = &self {
+            tracing::warn!(%code, %message, "cosigner refused signing request");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": message, "code": code })),
+            )
+                .into_response();
+        }
         let (status, message) = match &self {
             ApiError::Prepare(PrepareError::Enrich(_)) => {
                 (StatusCode::BAD_GATEWAY, "rpc enrichment failed".to_string())

@@ -22,6 +22,20 @@ pub struct Config {
     pub peer_verifying_key: Option<String>,
     #[serde(default = "default_ttl_secs")]
     pub ttl_secs: u64,
+    /// Spending policy. Absent ⇒ this cosigner refuses to sign anything
+    /// (fail closed) — authority must be granted explicitly.
+    pub policy: Option<PolicyConfig>,
+}
+
+/// Raw `[policy]` TOML: strings on purpose. Addresses and the wei limit are
+/// parsed (with EIP-55 checksum validation for mixed-case addresses) into
+/// `policy::Policy` at startup, so malformed values kill the process at boot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyConfig {
+    pub allowed_recipients: Vec<String>,
+    /// Decimal wei string, e.g. "10000000000000000" for 0.01 ETH.
+    pub max_value_wei: String,
+    pub allowed_chain_ids: Vec<u64>,
 }
 
 fn default_bind_addr() -> String {

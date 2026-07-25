@@ -9,7 +9,7 @@
 //! Everything here is `Copy`-able plain data with no behavior.
 //! Pattern: DTO / anti-corruption layer between wire and domain.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use sovra_mpc::EcdsaParts;
 
@@ -18,10 +18,14 @@ pub struct StartDkgRequest {
     pub instance: B256,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Deliberately carries the FULL unsigned transaction and no digest: each
+/// cosigner decodes the payload, derives the signing hash itself, and enforces
+/// policy on what it decoded. A digest field here would be a value a cosigner
+/// might be tempted to sign blindly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSignRequest {
     pub instance: B256,
-    pub tx_digest: B256,
+    pub unsigned_transaction: Bytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

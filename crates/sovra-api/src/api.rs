@@ -120,7 +120,12 @@ pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
         return Ok(Json(cached.clone()));
     }
 
-    let parts = state.backend.sign(tx_digest).await?;
+    // Full payload + our own digest: remote cosigners re-decode the payload
+    // and enforce policy on it; the digest is only for in-process backends.
+    let parts = state
+        .backend
+        .sign(body.unsigned_transaction.clone(), tx_digest)
+        .await?;
 
     // Load-bearing safety check: recovered signer must be the active address.
     let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, active)?;

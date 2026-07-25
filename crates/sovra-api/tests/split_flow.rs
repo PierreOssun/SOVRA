@@ -58,6 +58,12 @@ fn cosigner_state(
         peer_vk: Some(peer.verifying_key()),
         store: SignerStore::open(dir.join(format!("party{party_id}"))).unwrap(),
         relay_url: relay_url.to_owned(),
+        // Allow exactly the tx this test signs (to 0x11..11 on Sepolia).
+        policy: Some(sovra_cosigner::policy::Policy {
+            allowed_recipients: vec![Address::from([0x11; 20])],
+            max_value_wei: U256::from(10_000_000_000_000_000u64),
+            allowed_chain_ids: vec![11155111],
+        }),
         ttl: Duration::from_secs(10),
         op: tokio::sync::Mutex::new(()),
     })

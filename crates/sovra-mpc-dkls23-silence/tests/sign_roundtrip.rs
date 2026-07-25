@@ -1,4 +1,4 @@
-use sovra_eth::{TxIntent, finalize, prepare};
+use sovra_eth::{TxIntent, encode_unsigned, finalize, prepare};
 use sovra_mpc::MpcBackend;
 use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
@@ -28,7 +28,10 @@ async fn dkg_sign_finalize_roundtrip() {
 
     let prepared = prepare(base_intent()).expect("prepare");
 
-    let parts = backend.sign(prepared.signing_hash).await.expect("sign");
+    let parts = backend
+        .sign(encode_unsigned(&prepared.tx), prepared.signing_hash)
+        .await
+        .expect("sign");
 
     let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, address).expect("finalize");
 

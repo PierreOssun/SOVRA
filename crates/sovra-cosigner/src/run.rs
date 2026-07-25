@@ -44,6 +44,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let store = SignerStore::open(data_dir.join("store"))?;
 
+    // Parse policy at boot so bad addresses/values kill the process loudly.
+    // No [policy] section = sign nothing; warn so the operator sees why.
+    let policy = match &config.policy {
+        Some(raw) => Some(crate::policy::Policy::from_config(raw)?),
+        None => {
+            tracing::warn!("no [policy] configured; all signing requests will be rejected");
+            None
+        }
+    };
+
     let state = Arc::new(CosignerState {
         party_id: config.party_id,
         signing_key,
@@ -52,6 +62,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         relay_url: config.relay_url,
         ttl: Duration::from_secs(config.ttl_secs),
         op: tokio::sync::Mutex::new(()),
+        policy,
     });
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;

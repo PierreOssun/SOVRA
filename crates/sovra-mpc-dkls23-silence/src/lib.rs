@@ -120,7 +120,14 @@ impl MpcBackend for InProcessBackend {
         Ok(addr0)
     }
 
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    // In-process = both shares in one trust domain, so the payload adds
+    // nothing here; the caller's locally-derived digest is signed directly.
+    // Policy enforcement on the payload is the remote cosigners' job.
+    async fn sign(
+        &self,
+        _unsigned_tx: alloy_primitives::Bytes,
+        signing_hash: B256,
+    ) -> Result<EcdsaParts, MpcError> {
         let id = SignerId::new(ACTIVE_SIGNER_ID);
         let share0 = self.stores[0]
             .load_shard(&id)

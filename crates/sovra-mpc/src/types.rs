@@ -1,3 +1,14 @@
+//! The port itself: [`MpcBackend`] plus its result and error types.
+//!
+//! The trait is deliberately tiny — `dkg() -> Address`, `sign(hash) ->
+//! EcdsaParts` — so key custody stays entirely behind it: callers never see
+//! shares, setup messages, or transports. Written with
+//! return-position-impl-Future (+ `Send` bound) rather than `async fn` so
+//! the futures are usable across spawned tasks. `MpcError` variants are
+//! transport-agnostic on purpose; HTTP/WS specifics live in `sovra-ipc`.
+//! Pattern: hexagonal port — implementations are `RemoteBackend` (prod) and
+//! `InProcessBackend` (tests).
+
 use alloy_primitives::{Address, B256, U256};
 
 /// A 2-of-2 MPC backend: provisions key shares (DKG) and produces ECDSA

@@ -1,3 +1,15 @@
+//! Shared tracing setup for both binaries: one `init_tracing` call installs
+//! an env-filtered subscriber writing to stdout through a non-blocking
+//! appender — JSON when `SOVRA_LOG_JSON` is set (log aggregators), pretty
+//! otherwise (local dev), level from `RUST_LOG`.
+//!
+//! Why a crate instead of five lines in each `main`: the two processes must
+//! log identically for the shared correlation id to be greppable across
+//! them. The returned [`TracingGuard`] must be held for the process lifetime
+//! — dropping it flushes and stops the background writer, so an early drop
+//! silently swallows logs. Pattern: shared bootstrap module; RAII guard for
+//! flush-on-exit.
+
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 

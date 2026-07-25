@@ -1,3 +1,18 @@
+//! HTTP handlers for the public API (`/v1/dkg`, `/v1/prepare`, `/v1/sign`),
+//! their request/response DTOs, and the OpenAPI doc ([`ApiDoc`]).
+//!
+//! Why generic over `B: MpcBackend`: handlers never name a concrete backend,
+//! so integration tests drive the same code with the in-process backend while
+//! production uses `RemoteBackend` — the HTTP contract is pinned independently
+//! of the MPC transport. Two invariants live here on purpose: `sign` decodes
+//! and *recomputes* the digest (a caller-supplied hash is never trusted), and
+//! `finalize` checks the recovered signer against the active address.
+//! Concurrency: idempotency-cache read → `try_lock` (busy = 409, never queue)
+//! → re-check cache under the lock. utoipa annotations are colocated with each
+//! handler so the Swagger docs can't drift from the code.
+//! Pattern: thin controllers over the `MpcBackend` port; wire DTOs kept
+//! separate from domain types.
+
 use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};

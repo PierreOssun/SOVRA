@@ -1,3 +1,16 @@
+//! Server side of the relay plane: [`RelayHub`] wraps
+//! `sl_mpc_mate::coord::SimpleMessageRelay` behind an axum `GET /ws` upgrade.
+//! Hosted inside the sovra-api process (bound before the API router, since
+//! cosigners dial in mid-operation); both cosigners connect here and the relay
+//! matches their MPC round messages by instance id.
+//!
+//! Why this shape: `SimpleMessageRelay` already implements ask/put matching
+//! with TTL expiry, so the hub only pumps binary frames between the socket and
+//! a `relay.connect()` handle — no custom routing to maintain. axum (`ws`
+//! feature) is used because sovra-api already serves axum. The hub is
+//! deliberately dumb: frames are opaque, trust lives in the MPC protocol.
+//! Pattern: message broker (server half of the [`crate::client`] adapter pair).
+
 use std::sync::Arc;
 
 use axum::{

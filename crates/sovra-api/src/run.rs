@@ -1,3 +1,16 @@
+//! Process wiring for the orchestrator binary: config → RPC provider → relay
+//! hub → startup recovery → `AppState` → serve API and hub concurrently.
+//!
+//! Ordering is load-bearing: the hub binds *first* because cosigners dial it
+//! in the middle of every dkg/sign; recovery runs with a short-timeout probe
+//! client and bounded retries (cosigners are started before the api, but get
+//! ~10s of grace). `try_join!` serves both listeners so the process dies if
+//! either does — half-alive is worse than down. The `correlation` middleware
+//! mints one id per request and scopes it as a task-local, which is how the
+//! same id reaches cosigner logs via `RemoteBackend`.
+//! Pattern: composition root — the only place concrete types
+//! (`RemoteBackend`, real provider) are chosen.
+
 use std::time::Duration;
 
 use alloy_primitives::Address;

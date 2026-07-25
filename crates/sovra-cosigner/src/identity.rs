@@ -1,3 +1,14 @@
+//! Process identity: the ed25519 key a cosigner uses to authenticate inside
+//! the DKLs23 setup messages (the peer pins the matching verifying key).
+//!
+//! Why load-or-generate with a refuse-to-regenerate guard: the peer's config
+//! pins this key, so silently minting a new one on a corrupt/truncated file
+//! would break the pairing in a way that only surfaces as opaque MPC
+//! failures — better to error loudly. Raw 32 bytes on disk (0600, written
+//! atomically via `sovra_state::write_atomic`) because there is exactly one
+//! key and no metadata to justify a container format.
+//! Pattern: lazy initialization with fail-loud invariant protection.
+
 use std::path::Path;
 
 use ed25519_dalek::SigningKey;

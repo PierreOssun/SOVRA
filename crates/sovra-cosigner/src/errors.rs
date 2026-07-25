@@ -1,3 +1,13 @@
+//! The cosigner error type and its HTTP mapping.
+//!
+//! Same facade pattern as sovra-api's `errors.rs`: `#[from]` conversions let
+//! handlers use `?`, and one `IntoResponse` impl decides status codes.
+//! Semantics matter to the orchestrator: 409 = precondition/concurrency
+//! (busy, shard state, unpinned peer — retryable after operator action),
+//! 502 = the MPC run itself failed or timed out (relay, protocol, peer
+//! absent), 500 = local storage/identity is broken. Storage detail is logged,
+//! not returned. Pattern: error facade at the HTTP boundary.
+
 use axum::{
     Json,
     http::StatusCode,

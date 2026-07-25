@@ -1,3 +1,18 @@
+//! Cosigner-side relay client: [`WsRelay`] adapts a client WebSocket into the
+//! `sl_mpc_mate::coord::Relay` a party runner drives. One connection is dialed
+//! per keygen/sign run and dropped when the run ends.
+//!
+//! Why hand-written `Stream`/`Sink` impls: `Relay` requires a single *named*
+//! type that is both `Stream<Item = Vec<u8>>` and `Sink<Vec<u8>>`; combinator
+//! chains can't produce that. `tokio-tungstenite` is used because reqwest has
+//! no stable WebSocket client. `WebSocketStream` is `Unpin`, so plain
+//! `Pin::new` delegation suffices — no pin-project needed.
+//!
+//! Error policy: `Relay`'s `Stream` has no error channel, so a transport
+//! error logs a warning and ends the stream; the MPC run then fails or hits
+//! its TTL. Non-binary frames (ping/pong/text) are protocol noise and are
+//! skipped. Pattern: adapter (client half; server half in [`crate::hub`]).
+
 use std::{
     pin::Pin,
     task::{Context, Poll, ready},
@@ -22,7 +37,7 @@ impl WsRelay {
 }
 
 fn to_send_error(e: tungstenite::Error) -> MessageSendError {
-    tracing::warn!(error = %e, "ws relay send failed"); // last place the detail exists
+    tracing::warn!(error = %e, "ws relay send failed");
     MessageSendError
 }
 
@@ -33,9 +48,9 @@ impl Stream for WsRelay {
         loop {
             match ready!(Pin::new(&mut self.inner).poll_next(cx)) {
                 Some(Ok(Message::Binary(b))) => return Poll::Ready(Some(b.into())),
-                Some(Ok(_)) => continue, // text/ping/pong/close frame — not protocol data
+                Some(Ok(_)) => continue,
                 Some(Err(e)) => {
-                    tracing::warn!(error = %e, "ws relay stream error"); // watch-point 3
+                    tracing::warn!(error = %e, "ws relay stream error");
                     return Poll::Ready(None);
                 }
                 None => return Poll::Ready(None),

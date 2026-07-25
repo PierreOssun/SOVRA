@@ -1,3 +1,12 @@
+//! Attach a signature to a prepared tx and produce broadcast-ready bytes.
+//!
+//! The load-bearing step is the check, not the encoding: the signer address
+//! is recovered from the prehash and must equal `expected_from`, so a wrong
+//! or malicious signature (different key, different digest) is rejected here
+//! rather than discovered on-chain. Encoding goes through alloy's
+//! `TxEnvelope`/EIP-2718 path so the raw bytes and tx hash are exactly what
+//! the network computes. Pattern: pure function, validate-then-construct.
+
 use alloy_consensus::{SignableTransaction, TxEnvelope};
 use alloy_network::eip2718::Encodable2718;
 use alloy_primitives::{Address, Signature, U256};

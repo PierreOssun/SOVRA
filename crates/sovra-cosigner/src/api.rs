@@ -1,3 +1,17 @@
+//! Control-plane handlers: `/dkg` and `/sign` run this party's half of an MPC
+//! protocol; `/signer` is the recovery probe; `/identity` and `/health` serve
+//! operator setup and liveness.
+//!
+//! The shape both MPC handlers share is deliberate: `try_lock` the op mutex
+//! (busy = 409, never queue) → check shard preconditions → build the
+//! `PartyContext` → dial the hub fresh (`WsRelay::connect`, one connection per
+//! run, dropped at the end — no reconnect state to manage) → drive the party
+//! runner under `tokio::time::timeout(ttl)`. The timeout is what frees the op
+//! lock when the peer never joins; without it one dead peer would wedge this
+//! cosigner forever (a bug the split_flow gate test caught).
+//! Pattern: thin controllers delegating to `sovra-mpc-dkls23-silence`
+//! runners; wire types come from `sovra_ipc::control`.
+
 use std::sync::Arc;
 
 use axum::{Json, extract::State};

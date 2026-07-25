@@ -1,3 +1,14 @@
+//! Control-plane wire types (HTTP/JSON bodies) shared by orchestrator and
+//! cosigner, plus the correlation-id plumbing that threads one request id
+//! through all three processes' logs.
+//!
+//! Why mirror DTOs instead of reusing domain types: [`SignParts`] duplicates
+//! `sovra_mpc::EcdsaParts` (bridged by `From` both ways) so the wire contract
+//! stays serde-serializable without dragging serde into the backend-agnostic
+//! `sovra-mpc` seam, and can evolve independently of the domain type.
+//! Everything here is `Copy`-able plain data with no behavior.
+//! Pattern: DTO / anti-corruption layer between wire and domain.
+
 use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use sovra_mpc::EcdsaParts;
@@ -13,7 +24,7 @@ pub struct StartSignRequest {
     pub tx_digest: B256,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SignerInfo {
     pub address: Address,
 }

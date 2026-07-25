@@ -1,3 +1,15 @@
+//! Ethereum EIP-1559 transaction lifecycle: prepare (enrich from RPC, build,
+//! validate), encode/decode the unsigned form, and finalize (attach the
+//! signature, verify the recovered signer, emit broadcast-ready raw bytes).
+//!
+//! This crate holds **no key material** and knows nothing about MPC — it
+//! consumes an `(r, s, y_parity)` triple from whoever produced it. Built on
+//! alloy (consensus/provider/rpc-types) rather than hand-rolled RLP so tx
+//! hashing and encoding can't drift from the network rules. The `*_impl`
+//! functions in submodules are re-exported through thin wrappers here to keep
+//! one public surface. Pattern: pure domain layer; only `enrich` touches I/O
+//! (via a generic `Provider`, so tests inject a mock).
+
 mod types;
 
 pub mod prepare;

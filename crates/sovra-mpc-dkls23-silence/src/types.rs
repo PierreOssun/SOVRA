@@ -1,3 +1,10 @@
+//! [`PartyContext`] — everything one party needs to join a protocol run:
+//! its index, the shared instance id, its ed25519 identity, both parties'
+//! pinned verifying keys (positional by party id — order is a protocol
+//! invariant), and the run TTL. Bundled as one struct so the runner
+//! signatures don't take six loose parameters and callers can't mix
+//! arguments from different runs. Pattern: parameter object.
+
 use std::time::Duration;
 
 use alloy_primitives::B256;

@@ -1,3 +1,11 @@
+//! Orchestrator configuration: `config/sepolia` file, overridable per key by
+//! `SOVRA_*` environment variables (e.g. `SOVRA_BIND_ADDR`).
+//!
+//! Why the `config` crate: file + env layering with serde deserialization in
+//! a few lines, instead of hand-rolling precedence. Defaults live in serde
+//! `#[serde(default)]` attributes so the file only needs to state what
+//! deviates. Pattern: layered (12-factor-style) configuration.
+
 use config::{Config as RawConfig, ConfigError, Environment, File};
 use serde::Deserialize;
 

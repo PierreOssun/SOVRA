@@ -26,6 +26,9 @@ pub struct CosignerState {
     pub relay_url: String,
     pub ttl: Duration,
     pub op: tokio::sync::Mutex<()>,
+    /// This party's local signing policy — evaluated on every `/sign` before
+    /// any MPC message, loaded fail-closed at startup.
+    pub policy: sovra_policy::Policy,
 }
 
 impl CosignerState {

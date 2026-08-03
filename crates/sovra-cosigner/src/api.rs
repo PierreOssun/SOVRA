@@ -24,6 +24,7 @@ use sovra_ipc::{
     control::{Identity, SignParts, SignerInfo, StartDkgRequest, StartSignRequest},
 };
 use sovra_mpc_dkls23_silence::{keygen_party, sign_party};
+use sovra_policy::{TxView, Verdict};
 use sovra_state::StateError;
 use sovra_types::{ACTIVE_SIGNER_ID, SignerId, SignerMetadata};
 
@@ -65,7 +66,21 @@ pub async fn sign(
     let prepared = decode_unsigned(&req.unsigned_transaction)
         .map_err(|e| CosignerError::Undecodable(e.to_string()))?;
     validate_unsigned(&prepared.tx).map_err(|e| CosignerError::Undecodable(e.to_string()))?;
-    tracing::info!(tx_digest = %prepared.signing_hash, "sign request decoded");
+    // Policy runs before the shard is even loaded: on deny nothing was
+    // dialed, there is no session to clean up, and the op lock frees on
+    // return. The verdict logs (allow AND deny, digest + correlation id via
+    // the request span) are the future signature-receipt data source.
+    let view = TxView {
+        chain_id: prepared.tx.chain_id,
+        to: prepared.tx.to.to().copied(),
+        value: prepared.tx.value,
+        data: &prepared.tx.input,
+    };
+    if let Verdict::Deny(reason) = state.policy.evaluate(&view) {
+        tracing::warn!(tx_digest = %prepared.signing_hash, %reason, "policy denied");
+        return Err(CosignerError::PolicyDenied(reason));
+    }
+    tracing::info!(tx_digest = %prepared.signing_hash, "policy allowed");
     let share = match state.store.load_shard(&SignerId::new(ACTIVE_SIGNER_ID)) {
         Ok(s) => s,
         Err(StateError::NotFound(_)) => return Err(CosignerError::NoShard),

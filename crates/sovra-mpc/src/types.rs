@@ -32,6 +32,18 @@ pub struct EcdsaParts {
     pub y_parity: bool,
 }
 
+/// One cosigner's policy refusal, attributed to the party that vetoed.
+///
+/// `reason` is a display string, not `sovra_policy::DenyReason`: typing it
+/// here would give the chain-agnostic MPC seam an Ethereum-policy dependency,
+/// and nothing upstream branches on the variant — the enum lives at the
+/// cosigner, which is where the decision is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Veto {
+    pub party: u8,
+    pub reason: String,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum MpcError {
     #[error("distributed key generation failed: {0}")]
@@ -44,4 +56,6 @@ pub enum MpcError {
     Transport(String),
     #[error("cosigners disagreed: {0}")]
     PartyMismatch(String),
+    #[error("rejected by cosigner policy: {}", .vetoes.iter().map(|v| format!("party {}: {}", v.party, v.reason)).collect::<Vec<_>>().join("; "))]
+    Rejected { vetoes: Vec<Veto> },
 }

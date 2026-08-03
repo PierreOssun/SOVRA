@@ -28,6 +28,8 @@ pub enum CosignerError {
     PeerKeyUnset, // 409
     #[error("invalid transaction bytes: {0}")]
     Undecodable(String), // 422
+    #[error("policy denied: {0}")]
+    PolicyDenied(sovra_policy::DenyReason), // 403
     #[error("no active signer")]
     NoSigner, // 404
     #[error("relay connection failed: {0}")]
@@ -45,17 +47,35 @@ pub enum CosignerError {
 impl IntoResponse for CosignerError {
     fn into_response(self) -> Response {
         use CosignerError::*;
-        let (status, message) = match &self {
-            Busy | ShardExists | NoShard | PeerKeyUnset => (StatusCode::CONFLICT, self.to_string()),
-            Undecodable(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
-            NoSigner => (StatusCode::NOT_FOUND, self.to_string()),
-            Relay(_) | Mpc(_) | RunTimeout => (StatusCode::BAD_GATEWAY, self.to_string()),
+        let (status, body) = match &self {
+            Busy | ShardExists | NoShard | PeerKeyUnset => (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "error": self.to_string() }),
+            ),
+            Undecodable(_) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({ "error": self.to_string() }),
+            ),
+            // A deny is a decision, not a failure. The separate "reason"
+            // field is the contract remote.rs parses to attribute the veto.
+            PolicyDenied(reason) => (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({ "error": "policy denied", "reason": reason.to_string() }),
+            ),
+            NoSigner => (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({ "error": self.to_string() }),
+            ),
+            Relay(_) | Mpc(_) | RunTimeout => (
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({ "error": self.to_string() }),
+            ),
             State(_) | Identity(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal storage error".to_string(),
+                serde_json::json!({ "error": "internal storage error" }),
             ),
         };
         tracing::error!(error = %self, "request failed");
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(body)).into_response()
     }
 }

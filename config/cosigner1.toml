@@ -2,3 +2,4 @@ party_id = 1
 bind_addr = "127.0.0.1:4101"
 data_dir = "data/cosigner1"
 relay_url = "ws://127.0.0.1:3100/ws"
+policy_path = "config/policy1.toml"

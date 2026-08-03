@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{
     Router,
     body::Body,
@@ -28,6 +28,17 @@ async fn start_hub() -> String {
     format!("ws://{addr}/ws")
 }
 
+/// Wide-open policy so pre-M7 scenarios keep exercising the MPC path;
+/// deny behavior gets its own dedicated tests.
+fn permissive_policy() -> sovra_policy::Policy {
+    sovra_policy::Policy {
+        allowed_chain_ids: vec![11155111],
+        allowed_recipients: sovra_policy::Recipients::Any,
+        max_value_wei: U256::MAX,
+        allow_calldata: false,
+    }
+}
+
 /// Two cosigners, keys exchanged, pointed at one hub. Returns (router0, router1).
 fn two_cosigners(dir: &std::path::Path, relay_url: &str) -> (Router, Router) {
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
@@ -41,6 +52,7 @@ fn two_cosigners(dir: &std::path::Path, relay_url: &str) -> (Router, Router) {
             relay_url: relay_url.to_owned(),
             ttl: Duration::from_secs(60),
             op: tokio::sync::Mutex::new(()),
+            policy: permissive_policy(),
         })
     };
     (
@@ -63,6 +75,22 @@ async fn json_body<T: DeserializeOwned>(resp: axum::response::Response) -> T {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// A well-formed unsigned EIP-1559 tx — the only thing a cosigner will sign.
+fn unsigned_tx_bytes() -> Bytes {
+    let prepared = sovra_eth::prepare(sovra_eth::TxIntent {
+        chain_id: 11155111,
+        nonce: 0,
+        to: Address::repeat_byte(0x11),
+        value: U256::from(1u64),
+        gas_limit: 21_000,
+        max_fee_per_gas: 3,
+        max_priority_fee_per_gas: 2,
+        data: Bytes::new(),
+    })
+    .unwrap();
+    sovra_eth::encode_unsigned(&prepared.tx)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn joint_dkg_then_sign() {
     let dir = tempfile::tempdir().unwrap();
@@ -83,10 +111,11 @@ async fn joint_dkg_then_sign() {
     let (i0, i1): (SignerInfo, SignerInfo) = (json_body(a).await, json_body(b).await);
     assert_eq!(i0.address, i1.address);
 
-    // sign: fresh instance, same digest, concurrently -> identical SignParts
+    // sign: fresh instance, same unsigned tx bytes, concurrently -> identical
+    // SignParts (each party decodes and re-derives the digest itself)
     let sign = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
-        tx_digest: B256::from(rand::random::<[u8; 32]>()),
+        unsigned_transaction: unsigned_tx_bytes(),
     };
     let (a, b) = tokio::join!(
         r0.clone().oneshot(post_json("/sign", &sign)),
@@ -104,4 +133,68 @@ async fn joint_dkg_then_sign() {
         r0.oneshot(post_json("/dkg", &dkg2)).await.unwrap().status(),
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_rejects_undecodable_bytes_before_any_mpc() {
+    // Deliberately dead relay URL: if the handler dialed the hub before
+    // decoding, this would 502 — a 422 proves rejection happens first.
+    let dir = tempfile::tempdir().unwrap();
+    let (r0, _r1) = two_cosigners(dir.path(), "ws://127.0.0.1:9/ws");
+
+    let garbage = StartSignRequest {
+        instance: B256::from(rand::random::<[u8; 32]>()),
+        unsigned_transaction: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+    };
+    let resp = r0
+        .clone()
+        .oneshot(post_json("/sign", &garbage))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A second attempt gets 422 again, not 409 Busy: the op lock was freed.
+    let resp = r0.oneshot(post_json("/sign", &garbage)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_denied_by_policy_before_any_mpc() {
+    // Zero ceiling: the 1-wei test tx always violates. peer_vk is None and
+    // the store is empty on purpose — a 403 (not 409) proves the veto fires
+    // before shard load and peer checks; the dead relay URL proves no dial.
+    let dir = tempfile::tempdir().unwrap();
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let state = Arc::new(CosignerState {
+        party_id: 0,
+        signing_key: sk,
+        peer_vk: None,
+        store: SignerStore::open(dir.path().join("party0")).unwrap(),
+        relay_url: "ws://127.0.0.1:9/ws".into(),
+        ttl: Duration::from_secs(10),
+        op: tokio::sync::Mutex::new(()),
+        policy: sovra_policy::Policy {
+            max_value_wei: U256::ZERO,
+            ..permissive_policy()
+        },
+    });
+    let router = build_router(state);
+
+    let req = StartSignRequest {
+        instance: B256::from(rand::random::<[u8; 32]>()),
+        unsigned_transaction: unsigned_tx_bytes(),
+    };
+    let resp = router
+        .clone()
+        .oneshot(post_json("/sign", &req))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = json_body(resp).await;
+    assert_eq!(body["error"], "policy denied");
+    assert!(body["reason"].as_str().unwrap().contains("exceeds ceiling"));
+
+    // 403 again, not 409 Busy: the op lock was freed on deny.
+    let resp = router.oneshot(post_json("/sign", &req)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

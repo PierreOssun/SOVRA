@@ -1,0 +1,11 @@
+# Signing policy for cosigner 1. Deliberately a separate file from policy0:
+# the two parties' policies may differ — heterogeneous policy mirroring
+# heterogeneous trust is the point of enforcing at each shard. Same fail-
+# closed grammar as policy0.toml.
+allowed_chain_ids = [11155111] # Sepolia only
+
+allowed_recipients = ["0x000000000000000000000000000000000000dead"]
+
+max_value_wei = "1000000000000000000" # 1 ETH, decimal string
+
+allow_calldata = false

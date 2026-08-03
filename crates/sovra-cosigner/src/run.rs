@@ -43,6 +43,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let store = SignerStore::open(data_dir.join("store"))?;
+    let policy = load_policy(&config.policy_path)?;
+    tracing::info!(policy_path = %config.policy_path, "signing policy loaded");
 
     let state = Arc::new(CosignerState {
         party_id: config.party_id,
@@ -52,6 +54,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         relay_url: config.relay_url,
         ttl: Duration::from_secs(config.ttl_secs),
         op: tokio::sync::Mutex::new(()),
+        policy,
     });
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
@@ -69,6 +72,14 @@ pub fn build_router(state: Arc<CosignerState>) -> Router {
         .route("/health", get(api::health))
         .layer(axum::middleware::from_fn(correlation))
         .with_state(state)
+}
+
+/// Fail-closed: any problem reading or parsing the policy file aborts
+/// startup — unlike the peer key, there is no degraded mode in which running
+/// without a policy is acceptable (that would be a blind signer again).
+fn load_policy(path: &str) -> Result<sovra_policy::Policy, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("policy file {path}: {e}"))?;
+    Ok(toml::from_str(&raw).map_err(|e| format!("policy file {path}: {e}"))?)
 }
 
 fn parse_vk(hex: &str) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
@@ -96,4 +107,22 @@ async fn correlation(req: axum::extract::Request, next: axum::middleware::Next) 
         path = %req.uri().path(),
     );
     tracing::Instrument::instrument(next.run(req), span).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// Fail-closed startup: no policy file, no process.
+    #[test]
+    fn missing_policy_file_refuses_to_start() {
+        assert!(super::load_policy("/nonexistent/policy.toml").is_err());
+    }
+
+    #[test]
+    fn corrupt_policy_file_refuses_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        // Partially parsed == parse failure: keys are missing.
+        std::fs::write(&path, "allowed_chain_ids = [11155111]\n").unwrap();
+        assert!(super::load_policy(path.to_str().unwrap()).is_err());
+    }
 }

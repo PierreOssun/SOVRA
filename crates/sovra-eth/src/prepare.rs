@@ -10,13 +10,20 @@
 //! Pattern: functional core, imperative shell.
 
 use alloy_consensus::{SignableTransaction, TxEip1559};
+#[cfg(feature = "rpc")]
 use alloy_primitives::Address;
+#[cfg(feature = "rpc")]
 use alloy_provider::{Provider, ProviderBuilder};
+#[cfg(feature = "rpc")]
 use alloy_rpc_types_eth::TransactionRequest;
+#[cfg(feature = "rpc")]
 use url::Url;
 
-use crate::{EnrichError, PrepareError, PreparedTx, ProviderError, TxIntent, TxRequest};
+#[cfg(feature = "rpc")]
+use crate::{EnrichError, ProviderError, TxRequest};
+use crate::{PrepareError, PreparedTx, TxIntent};
 
+#[cfg(feature = "rpc")]
 pub async fn prepare_from_rpc_impl<P: Provider>(
     req: TxRequest,
     from: Address,
@@ -53,6 +60,7 @@ pub fn validate_unsigned(tx: &TxEip1559) -> Result<(), PrepareError> {
     Ok(())
 }
 
+#[cfg(feature = "rpc")]
 pub async fn enrich<P: Provider>(
     req: TxRequest,
     from: Address,
@@ -96,6 +104,7 @@ pub async fn enrich<P: Provider>(
     Ok(tx_intent)
 }
 
+#[cfg(feature = "rpc")]
 pub fn http_provider(url: &str) -> Result<impl Provider + use<>, ProviderError> {
     let url = Url::parse(url)?;
     Ok(ProviderBuilder::new().connect_http(url))

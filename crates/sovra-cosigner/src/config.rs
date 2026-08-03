@@ -17,6 +17,9 @@ pub struct Config {
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
     pub data_dir: String,
+    /// No default on purpose: a cosigner without a policy file is a blind
+    /// signer, so a missing key must fail config load, not fall back.
+    pub policy_path: String,
     #[serde(default = "default_relay_url")]
     pub relay_url: String,
     pub peer_verifying_key: Option<String>,

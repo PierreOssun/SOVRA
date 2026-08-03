@@ -9,17 +9,22 @@
 //! runner under `tokio::time::timeout(ttl)`. The timeout is what frees the op
 //! lock when the peer never joins; without it one dead peer would wedge this
 //! cosigner forever (a bug the split_flow gate test caught).
+//! `/sign` receives the unsigned tx *preimage*, never a digest: it decodes
+//! and validates the bytes and derives the signing hash itself, so this
+//! party can only ever sign well-formed EIP-1559 transactions it inspected.
 //! Pattern: thin controllers delegating to `sovra-mpc-dkls23-silence`
 //! runners; wire types come from `sovra_ipc::control`.
 
 use std::sync::Arc;
 
 use axum::{Json, extract::State};
+use sovra_eth::{decode_unsigned, prepare::validate_unsigned};
 use sovra_ipc::{
     client::WsRelay,
     control::{Identity, SignParts, SignerInfo, StartDkgRequest, StartSignRequest},
 };
 use sovra_mpc_dkls23_silence::{keygen_party, sign_party};
+use sovra_policy::{TxView, Verdict};
 use sovra_state::StateError;
 use sovra_types::{ACTIVE_SIGNER_ID, SignerId, SignerMetadata};
 
@@ -56,6 +61,26 @@ pub async fn sign(
     Json(req): Json<StartSignRequest>,
 ) -> Result<Json<SignParts>, CosignerError> {
     let _op = state.op.try_lock().map_err(|_| CosignerError::Busy)?;
+    // Parse, don't trust: the digest this party signs is derived here, from
+    // bytes it decoded and validated itself — before any MPC message.
+    let prepared = decode_unsigned(&req.unsigned_transaction)
+        .map_err(|e| CosignerError::Undecodable(e.to_string()))?;
+    validate_unsigned(&prepared.tx).map_err(|e| CosignerError::Undecodable(e.to_string()))?;
+    // Policy runs before the shard is even loaded: on deny nothing was
+    // dialed, there is no session to clean up, and the op lock frees on
+    // return. The verdict logs (allow AND deny, digest + correlation id via
+    // the request span) are the future signature-receipt data source.
+    let view = TxView {
+        chain_id: prepared.tx.chain_id,
+        to: prepared.tx.to.to().copied(),
+        value: prepared.tx.value,
+        data: &prepared.tx.input,
+    };
+    if let Verdict::Deny(reason) = state.policy.evaluate(&view) {
+        tracing::warn!(tx_digest = %prepared.signing_hash, %reason, "policy denied");
+        return Err(CosignerError::PolicyDenied(reason));
+    }
+    tracing::info!(tx_digest = %prepared.signing_hash, "policy allowed");
     let share = match state.store.load_shard(&SignerId::new(ACTIVE_SIGNER_ID)) {
         Ok(s) => s,
         Err(StateError::NotFound(_)) => return Err(CosignerError::NoShard),
@@ -63,9 +88,12 @@ pub async fn sign(
     };
     let ctx = state.ctx(req.instance)?;
     let relay = WsRelay::connect(&state.relay_url).await?;
-    let parts = tokio::time::timeout(state.ttl, sign_party(&ctx, &share, req.tx_digest, relay))
-        .await
-        .map_err(|_| CosignerError::RunTimeout)??;
+    let parts = tokio::time::timeout(
+        state.ttl,
+        sign_party(&ctx, &share, prepared.signing_hash, relay),
+    )
+    .await
+    .map_err(|_| CosignerError::RunTimeout)??;
     Ok(Json(parts.into()))
 }
 

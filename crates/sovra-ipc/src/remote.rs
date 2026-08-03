@@ -16,10 +16,10 @@
 
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use reqwest::StatusCode;
 use serde::{Serialize, de::DeserializeOwned};
-use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
+use sovra_mpc::{EcdsaParts, MpcBackend, MpcError, Veto};
 use url::Url;
 
 use crate::{
@@ -49,10 +49,10 @@ impl MpcBackend for RemoteBackend {
             .map(|i| i.address)
     }
 
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
         let req = StartSignRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
-            tx_digest: signing_hash,
+            unsigned_transaction: Bytes::copy_from_slice(unsigned_tx),
         };
         self.broadcast::<_, SignParts>("sign", &req)
             .await
@@ -81,7 +81,7 @@ impl RemoteBackend {
             self.post::<_, Resp>(0, path, req),
             self.post::<_, Resp>(1, path, req)
         );
-        let (a, b) = (r0?, r1?);
+        let (a, b) = combine(r0, r1)?;
         if a != b {
             return Err(MpcError::PartyMismatch(format!("{path}: {a:?} != {b:?}")));
         }
@@ -111,6 +111,21 @@ impl RemoteBackend {
             .map_err(|e| MpcError::Transport(format!("cosigner{party} {path}: {e}")))?;
 
         let status = resp.status();
+        if status == StatusCode::FORBIDDEN {
+            // A policy veto is a decision, not a transport failure: keep it
+            // typed so the orchestrator can attribute the 403 to this party.
+            let text = resp.text().await.unwrap_or_default();
+            let reason = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["reason"].as_str().map(str::to_owned))
+                .unwrap_or(text);
+            return Err(MpcError::Rejected {
+                vetoes: vec![Veto {
+                    party: party as u8,
+                    reason,
+                }],
+            });
+        }
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(MpcError::Transport(format!(
@@ -120,6 +135,32 @@ impl RemoteBackend {
         resp.json()
             .await
             .map_err(|e| MpcError::Transport(format!("cosigner{party} {path}: bad response: {e}")))
+    }
+}
+
+/// Merge the two per-party outcomes of one broadcast into a single result.
+///
+/// In 2-of-2 either cosigner alone blocks a signature, and when policies
+/// differ the vetoing party answers 403 quickly while the allowing party
+/// waits alone in the hub until its ttl expires into a timeout/502 — so
+/// which error this function surfaces decides whether a policy veto is
+/// visible or buried in transport noise.
+fn combine<Resp>(
+    r0: Result<Resp, MpcError>,
+    r1: Result<Resp, MpcError>,
+) -> Result<(Resp, Resp), MpcError> {
+    match (r0, r1) {
+        (Ok(a), Ok(b)) => Ok((a, b)),
+        // Both vetoed: one Rejected carrying every veto, party 0 first.
+        // This arm must precede the single-Rejected arms to ever match.
+        (Err(MpcError::Rejected { vetoes: mut v0 }), Err(MpcError::Rejected { vetoes: v1 })) => {
+            v0.extend(v1);
+            Err(MpcError::Rejected { vetoes: v0 })
+        }
+        // A veto outranks whatever happened to the other party — typically
+        // the allowing cosigner's ttl timeout while it waited alone.
+        (Err(e @ MpcError::Rejected { .. }), _) | (_, Err(e @ MpcError::Rejected { .. })) => Err(e),
+        (Err(e), _) | (_, Err(e)) => Err(e),
     }
 }
 

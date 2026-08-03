@@ -52,7 +52,8 @@ cargo run -p sovra-cli -- prepare --to 0x000000000000000000000000000000000000dEa
   | xargs -I{} cargo run -p sovra-cli -- sign --tx {}
 ```
 
-Optional calldata goes through `--data` (defaults to `0x`):
+Optional calldata goes through `--data` (defaults to `0x`) — note the sample
+signing policy refuses calldata at *sign* time (see the policy section below):
 
 ```bash
 cargo run -p sovra-cli -- prepare --to 0x... --value 0 --data 0xdeadbeef
@@ -65,6 +66,38 @@ node rejects a spend the address can't cover. The symptom is a
 `insufficient funds` reason is in the orchestrator's log. Fund the DKG address from
 any Sepolia faucet, then non-zero values (and `POST /v1/broadcast`, not yet in the
 CLI) work.
+
+### Signing policy (per cosigner)
+
+Each cosigner loads its own policy at startup (`policy_path` in
+`config/cosigner{0,1}.toml` → `config/policy{0,1}.toml`) and evaluates every
+sign request against it — after decoding the unsigned tx itself, before
+joining any MPC round. A missing or unparsable policy file means the cosigner
+**refuses to start** (fail-closed). The two files may differ; in 2-of-2
+either party alone vetoes.
+
+All keys are required: `allowed_chain_ids`, `allowed_recipients` (addresses,
+`["*"]` = any, `[]` = deny all), `max_value_wei` (**decimal string** — a TOML
+integer caps at ~9.2 ETH), `allow_calldata`. The shipped samples allow only
+the demo burn address on Sepolia, up to 1 ETH, no calldata.
+
+Deny demo — the sample policy refuses calldata, so signing the `--data`
+example above 403s with both vetoes attributed:
+
+```bash
+cargo run -p sovra-cli -- prepare --to 0x000000000000000000000000000000000000dEaD --value 0 --data 0xdeadbeef \
+  | jq -r .unsigned_transaction \
+  | xargs -I{} cargo run -p sovra-cli -- sign --tx {}
+# → 403 { "error": "policy denied",
+#         "vetoes": [ { "party": 0, "reason": "calldata not allowed" },
+#                     { "party": 1, "reason": "calldata not allowed" } ] }
+```
+
+Nothing was signed and no lock stays held — the same command without `--data`
+succeeds immediately afterwards. For a single-party veto, tighten only
+`config/policy0.toml` (e.g. `max_value_wei = "0"`), restart cosigner 0, and
+sign a non-zero value: the 403 then names party 0 alone (the response arrives
+after the allowing party's MPC timeout, ~60s by default).
 
 ---
 

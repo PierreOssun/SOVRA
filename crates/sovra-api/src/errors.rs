@@ -72,6 +72,10 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "cosigner cross-check failed".to_string(), // a party is lying or misconfigured — not a gateway blip
             ),
+            // In 2-of-2, one veto is enough; the body below names who and why.
+            ApiError::Mpc(MpcError::Rejected { .. }) => {
+                (StatusCode::FORBIDDEN, "policy denied".to_string())
+            }
             ApiError::Mpc(_) => (StatusCode::BAD_GATEWAY, "mpc protocol failed".to_string()),
             ApiError::Finalize(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -83,6 +87,18 @@ impl IntoResponse for ApiError {
             tracing::error!(err = %self, %status, "request failed");
         }
 
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        // The one body that carries structure: a policy 403 attributes every
+        // veto to its party so the caller knows which cosigner said no.
+        let body = match &self {
+            ApiError::Mpc(MpcError::Rejected { vetoes }) => serde_json::json!({
+                "error": message,
+                "vetoes": vetoes
+                    .iter()
+                    .map(|v| serde_json::json!({ "party": v.party, "reason": v.reason }))
+                    .collect::<Vec<_>>(),
+            }),
+            _ => serde_json::json!({ "error": message }),
+        };
+        (status, Json(body)).into_response()
     }
 }

@@ -8,7 +8,7 @@
 //! the network computes. Pattern: pure function, validate-then-construct.
 
 use alloy_consensus::{SignableTransaction, TxEnvelope};
-use alloy_network::eip2718::Encodable2718;
+use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Signature, U256};
 
 use crate::{FinalizeError, PreparedTx, SignedTx};

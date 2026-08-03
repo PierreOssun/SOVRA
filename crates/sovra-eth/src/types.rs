@@ -11,8 +11,10 @@
 
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, TxNonce, U256};
+#[cfg(feature = "rpc")]
 use alloy_transport::TransportError;
 use thiserror::Error;
+#[cfg(feature = "rpc")]
 use url::ParseError;
 
 /// The caller's input
@@ -80,6 +82,7 @@ pub enum PrepareError {
     #[error("gas limit must not be zero")]
     ZeroGasLimit,
 
+    #[cfg(feature = "rpc")]
     #[error("failed to enrich transaction from RPC: {0}")]
     Enrich(#[from] EnrichError),
 }
@@ -95,12 +98,14 @@ pub enum FinalizeError {
     },
 }
 
+#[cfg(feature = "rpc")]
 #[derive(Error, Debug)]
 pub enum EnrichError {
     #[error("rpc call failed: {0}")]
     Rpc(#[from] TransportError),
 }
 
+#[cfg(feature = "rpc")]
 #[derive(Error, Debug)]
 pub enum ProviderError {
     #[error("invalid RPC URL: {0}")]

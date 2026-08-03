@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use reqwest::StatusCode;
 use serde::{Serialize, de::DeserializeOwned};
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
@@ -49,10 +49,10 @@ impl MpcBackend for RemoteBackend {
             .map(|i| i.address)
     }
 
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
         let req = StartSignRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
-            tx_digest: signing_hash,
+            unsigned_transaction: Bytes::copy_from_slice(unsigned_tx),
         };
         self.broadcast::<_, SignParts>("sign", &req)
             .await

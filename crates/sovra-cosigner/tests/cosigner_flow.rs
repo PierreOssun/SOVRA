@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{
     Router,
     body::Body,
@@ -63,6 +63,22 @@ async fn json_body<T: DeserializeOwned>(resp: axum::response::Response) -> T {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// A well-formed unsigned EIP-1559 tx — the only thing a cosigner will sign.
+fn unsigned_tx_bytes() -> Bytes {
+    let prepared = sovra_eth::prepare(sovra_eth::TxIntent {
+        chain_id: 11155111,
+        nonce: 0,
+        to: Address::repeat_byte(0x11),
+        value: U256::from(1u64),
+        gas_limit: 21_000,
+        max_fee_per_gas: 3,
+        max_priority_fee_per_gas: 2,
+        data: Bytes::new(),
+    })
+    .unwrap();
+    sovra_eth::encode_unsigned(&prepared.tx)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn joint_dkg_then_sign() {
     let dir = tempfile::tempdir().unwrap();
@@ -83,10 +99,11 @@ async fn joint_dkg_then_sign() {
     let (i0, i1): (SignerInfo, SignerInfo) = (json_body(a).await, json_body(b).await);
     assert_eq!(i0.address, i1.address);
 
-    // sign: fresh instance, same digest, concurrently -> identical SignParts
+    // sign: fresh instance, same unsigned tx bytes, concurrently -> identical
+    // SignParts (each party decodes and re-derives the digest itself)
     let sign = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
-        tx_digest: B256::from(rand::random::<[u8; 32]>()),
+        unsigned_transaction: unsigned_tx_bytes(),
     };
     let (a, b) = tokio::join!(
         r0.clone().oneshot(post_json("/sign", &sign)),
@@ -104,4 +121,27 @@ async fn joint_dkg_then_sign() {
         r0.oneshot(post_json("/dkg", &dkg2)).await.unwrap().status(),
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_rejects_undecodable_bytes_before_any_mpc() {
+    // Deliberately dead relay URL: if the handler dialed the hub before
+    // decoding, this would 502 — a 422 proves rejection happens first.
+    let dir = tempfile::tempdir().unwrap();
+    let (r0, _r1) = two_cosigners(dir.path(), "ws://127.0.0.1:9/ws");
+
+    let garbage = StartSignRequest {
+        instance: B256::from(rand::random::<[u8; 32]>()),
+        unsigned_transaction: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+    };
+    let resp = r0
+        .clone()
+        .oneshot(post_json("/sign", &garbage))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A second attempt gets 422 again, not 409 Busy: the op lock was freed.
+    let resp = r0.oneshot(post_json("/sign", &garbage)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }

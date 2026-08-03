@@ -9,7 +9,9 @@ description = "Sovra"
 rust-version = "1.85"
 
 [workspace.dependencies]
-sovra-eth = { path = "crates/sovra-eth" }
+# default-features off at the workspace level so lean consumers (cosigner,
+# in-process backend) get the pure core; sovra-api opts into "rpc".
+sovra-eth = { path = "crates/sovra-eth", default-features = false }
 sovra-observability = { path = "crates/sovra-observability" }
 sovra-types = { path = "crates/sovra-types" }
 sovra-state = { path = "crates/sovra-state" }
@@ -18,6 +20,7 @@ sovra-mpc-dkls23-silence = { path = "crates/sovra-mpc-dkls23-silence" }
 sovra-ipc = { path = "crates/sovra-ipc" }
 sovra-cosigner = { path = "crates/sovra-cosigner" }
 alloy-consensus = "2.0.5"
+alloy-eips = "2.1.0"
 alloy-primitives = "1.6.0"
 alloy-provider = "2.1.0"
 alloy-transport = "2.1.0"

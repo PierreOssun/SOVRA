@@ -120,7 +120,14 @@ impl MpcBackend for InProcessBackend {
         Ok(addr0)
     }
 
-    async fn sign(&self, signing_hash: B256) -> Result<EcdsaParts, MpcError> {
+    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
+        // Mirror the production trust shape: the digest is derived here from
+        // decoded bytes — this backend cannot be handed a digest to sign.
+        let prepared = sovra_eth::decode_unsigned(unsigned_tx)
+            .map_err(|e| MpcError::Sign(format!("undecodable transaction: {e}")))?;
+        sovra_eth::prepare::validate_unsigned(&prepared.tx)
+            .map_err(|e| MpcError::Sign(format!("invalid transaction: {e}")))?;
+        let signing_hash = prepared.signing_hash;
         let id = SignerId::new(ACTIVE_SIGNER_ID);
         let share0 = self.stores[0]
             .load_shard(&id)

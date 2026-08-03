@@ -6,10 +6,12 @@
 //! `sovra_mpc::EcdsaParts` (bridged by `From` both ways) so the wire contract
 //! stays serde-serializable without dragging serde into the backend-agnostic
 //! `sovra-mpc` seam, and can evolve independently of the domain type.
-//! Everything here is `Copy`-able plain data with no behavior.
+//! Plain data with no behavior. [`StartSignRequest`] carries the unsigned tx
+//! preimage — never a digest — so each cosigner derives what it signs from
+//! bytes it decoded itself; its `Bytes` field is why it alone isn't `Copy`.
 //! Pattern: DTO / anti-corruption layer between wire and domain.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use sovra_mpc::EcdsaParts;
 
@@ -18,10 +20,10 @@ pub struct StartDkgRequest {
     pub instance: B256,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSignRequest {
     pub instance: B256,
-    pub tx_digest: B256,
+    pub unsigned_transaction: Bytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

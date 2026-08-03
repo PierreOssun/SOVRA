@@ -4,16 +4,30 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["rpc"]
+# The RPC-touching shell: enrich, prepare_from_rpc, http_provider and the
+# provider/transport stack behind them. Off for lean consumers (the cosigner)
+# that only decode, validate, hash, and finalize.
+rpc = [
+  "dep:alloy-provider",
+  "dep:alloy-rpc-types-eth",
+  "dep:alloy-transport",
+  "dep:url",
+]
+
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }
 alloy-consensus = { workspace = true, features = ["k256"] }
-alloy-provider = { workspace = true }
-alloy-transport = { workspace = true }
-alloy-network = { workspace = true }
-alloy-rpc-types-eth = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-provider = { workspace = true, optional = true }
+alloy-transport = { workspace = true, optional = true }
+alloy-rpc-types-eth = { workspace = true, optional = true }
 thiserror = { workspace = true }
+alloy-rlp = { workspace = true }
+url = { workspace = true, optional = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
-alloy-rlp = { workspace = true }
-url = { workspace = true }
-tracing = { workspace = true }

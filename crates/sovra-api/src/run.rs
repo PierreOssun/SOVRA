@@ -33,14 +33,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cosigners: [Url; 2] = [config.cosigner0_url.parse()?, config.cosigner1_url.parse()?];
 
     // Hub up FIRST — cosigners dial it mid-run; it must exist before any dkg/sign.
-    let relay_listener = tokio::net::TcpListener::bind(&config.relay_bind).await?;
+    let relay_listener = std::net::TcpListener::bind(&config.relay_bind)?;
     let hub = sovra_ipc::hub::ws_router(RelayHub::default());
-    tracing::info!("relay hub on {}", config.relay_bind);
+    tracing::info!("relay hub on {} (mTLS)", config.relay_bind);
+
+    // Fail-closed: no TLS material, no process (same rule as the cosigners).
+    let tls = sovra_ipc::tls::TlsMaterials::load(
+        &config.tls_ca_path,
+        &config.tls_cert_path,
+        &config.tls_key_path,
+    )?;
 
     // Bounded retry: cosigners start first (RUN.md), but give them ~10s of grace.
-    let probe = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let probe = tls.http_client(Duration::from_secs(5))?;
     let active = recover_with_retry(&probe, &cosigners).await?;
     if let Some(address) = active {
         tracing::info!(%address, "recovered active dkg generation");
@@ -48,15 +53,22 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::new(
         provider,
-        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone()),
+        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone(), &tls)?,
         active,
     );
     let api_listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("listening on {}", config.bind_addr);
 
+    // The public API stays plaintext loopback (the custody boundary is the
+    // cosigner); the hub requires a project-CA client cert like every other
+    // internal socket.
     tokio::try_join!(
         async { axum::serve(api_listener, build_router(state)).await },
-        async { axum::serve(relay_listener, hub).await },
+        async {
+            sovra_ipc::tls::serve_mtls(relay_listener, hub, &tls)
+                .await
+                .map_err(std::io::Error::other)
+        },
     )?;
     Ok(())
 }

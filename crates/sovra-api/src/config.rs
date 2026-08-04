@@ -18,6 +18,12 @@ pub struct Config {
     pub cosigner1_url: String,
     #[serde(default = "default_relay_bind")]
     pub relay_bind: String,
+    /// No defaults on purpose (mirrors the cosigner's rule): the control
+    /// plane is mTLS-only, so missing material must fail startup, not fall
+    /// back to plaintext.
+    pub tls_ca_path: String,
+    pub tls_cert_path: String,
+    pub tls_key_path: String,
 }
 fn default_bind_addr() -> String {
     "127.0.0.1:3000".to_string()

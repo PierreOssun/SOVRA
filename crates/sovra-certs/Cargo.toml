@@ -1,0 +1,18 @@
+[package]
+name = "sovra-certs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# aws_lc_rs: the crypto backend already in the tree via reqwest/rustls.
+# x509-parser: unlocks Issuer::from_ca_cert_pem — the CA-reload path that makes
+# later provisioning runs additive instead of minting a new trust root.
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem", "x509-parser"] }
+sovra-state = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+x509-parser = { workspace = true }

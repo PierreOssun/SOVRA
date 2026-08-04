@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use std::{path::PathBuf, sync::Arc};
+
 use alloy_consensus::private::alloy_rlp::bytes;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{
@@ -8,7 +10,53 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use sovra_eth::{TxIntent, encode_unsigned, prepare};
+use sovra_ipc::tls::TlsMaterials;
 use tower::ServiceExt;
+
+/// One project CA + a leaf per process, minted into a tempdir — the test-side
+/// twin of `cargo xtask certs`. Materials are `Arc` because test servers run
+/// in spawned tasks that must own them.
+pub struct TestTls {
+    /// Keeps the tempdir (and every pem in it) alive for the test's duration.
+    pub dir: tempfile::TempDir,
+    pub orchestrator: Arc<TlsMaterials>,
+    pub cosigners: [Arc<TlsMaterials>; 2],
+}
+
+impl TestTls {
+    /// For clients that should trust the CA but present no identity.
+    pub fn ca_path(&self) -> PathBuf {
+        self.dir.path().join(sovra_certs::CA_CERT_FILE)
+    }
+}
+
+pub fn test_tls() -> TestTls {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = sovra_certs::ensure_ca(dir.path()).unwrap();
+    let mk = |stem: &str, cn: &str| {
+        let leaf =
+            sovra_certs::ensure_leaf(dir.path(), stem, cn, &sovra_certs::default_sans(), &ca)
+                .unwrap();
+        Arc::new(
+            TlsMaterials::load(
+                dir.path().join(sovra_certs::CA_CERT_FILE),
+                &leaf.cert,
+                &leaf.key,
+            )
+            .unwrap(),
+        )
+    };
+    let orchestrator = mk("orchestrator", "sovra-orchestrator");
+    let cosigners = [
+        mk("cosigner0", "sovra-cosigner-0"),
+        mk("cosigner1", "sovra-cosigner-1"),
+    ];
+    TestTls {
+        dir,
+        orchestrator,
+        cosigners,
+    }
+}
 
 pub fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()

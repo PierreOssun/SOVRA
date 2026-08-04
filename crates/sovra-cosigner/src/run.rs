@@ -17,6 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use ed25519_dalek::VerifyingKey;
+use sovra_ipc::tls::{TlsMaterials, serve_mtls};
 use sovra_state::SignerStore;
 
 use crate::{api, config::Config, identity, state::CosignerState};
@@ -45,6 +46,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = SignerStore::open(data_dir.join("store"))?;
     let policy = load_policy(&config.policy_path)?;
     tracing::info!(policy_path = %config.policy_path, "signing policy loaded");
+    // Fail-closed like the policy: no TLS material, no process. The loader's
+    // errors carry the offending path.
+    let tls = TlsMaterials::load(
+        &config.tls_ca_path,
+        &config.tls_cert_path,
+        &config.tls_key_path,
+    )?;
+    // Same rule at the scheme: for a `ws://` relay_url tungstenite would
+    // silently skip TLS — refuse it here as a config error instead.
+    if !config.relay_url.starts_with("wss://") {
+        return Err(Box::new(sovra_ipc::tls::TlsError::PlainScheme {
+            url: config.relay_url,
+            expected: "wss",
+        }));
+    }
 
     let state = Arc::new(CosignerState {
         party_id: config.party_id,
@@ -52,14 +68,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         peer_vk,
         store,
         relay_url: config.relay_url,
+        relay_tls: tls.ws_client_config()?,
         ttl: Duration::from_secs(config.ttl_secs),
         op: tokio::sync::Mutex::new(()),
         policy,
     });
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-    tracing::info!("cosigner listening on {}", config.bind_addr);
-    axum::serve(listener, build_router(state)).await?;
+    let listener = std::net::TcpListener::bind(&config.bind_addr)?;
+    tracing::info!("cosigner listening on {} (mTLS)", config.bind_addr);
+    serve_mtls(listener, build_router(state), &tls).await?;
     Ok(())
 }
 

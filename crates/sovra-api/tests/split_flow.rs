@@ -7,41 +7,36 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use alloy_consensus::{
     TxEnvelope, private::alloy_eips::Decodable2718, transaction::SignerRecoverable,
 };
-use alloy_primitives::{Address, B256, Bytes, U256, bytes};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::Provider;
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode},
-};
+use axum::{Router, http::StatusCode};
 use ed25519_dalek::SigningKey;
-use http_body_util::BodyExt;
 use sovra_api::{
     orchestrator::{self, RecoverError},
     run::build_router as api_router_fn,
     state::AppState,
 };
 use sovra_cosigner::{run::build_router as cosigner_router, state::CosignerState};
-use sovra_eth::{TxIntent, encode_unsigned, prepare};
 use sovra_ipc::{
     hub::{RelayHub, ws_router},
     remote::RemoteBackend,
+    tls::{TlsMaterials, serve_mtls},
 };
 use sovra_state::SignerStore;
 use test_helpers::*;
-use tower::ServiceExt;
 use url::Url;
 
-// copied from cosigner_flow.rs
-async fn start_hub() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+// copied from cosigner_flow.rs; the hub rides the orchestrator's materials,
+// mirroring run.rs
+async fn start_hub(tls: Arc<TlsMaterials>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, ws_router(RelayHub::default()))
+        serve_mtls(listener, ws_router(RelayHub::default()), &tls)
             .await
             .unwrap()
     });
-    format!("ws://{addr}/ws")
+    format!("wss://{addr}/ws")
 }
 
 /// Wide-open policy for the pre-M7 scenarios; deny cases build their own.
@@ -61,16 +56,19 @@ fn cosigner_state(
     peer: &SigningKey,
     dir: &std::path::Path,
     relay_url: &str,
+    tls: &TlsMaterials,
 ) -> Arc<CosignerState> {
-    cosigner_state_with_policy(party_id, sk, peer, dir, relay_url, permissive_policy())
+    cosigner_state_with_policy(party_id, sk, peer, dir, relay_url, tls, permissive_policy())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cosigner_state_with_policy(
     party_id: u8,
     sk: &SigningKey,
     peer: &SigningKey,
     dir: &std::path::Path,
     relay_url: &str,
+    tls: &TlsMaterials,
     policy: sovra_policy::Policy,
 ) -> Arc<CosignerState> {
     Arc::new(CosignerState {
@@ -79,76 +77,73 @@ fn cosigner_state_with_policy(
         peer_vk: Some(peer.verifying_key()),
         store: SignerStore::open(dir.join(format!("party{party_id}"))).unwrap(),
         relay_url: relay_url.to_owned(),
+        relay_tls: tls.ws_client_config().unwrap(),
         ttl: Duration::from_secs(10),
         op: tokio::sync::Mutex::new(()),
         policy,
     })
 }
 
-// The JoinHandle is the kill switch for the cosigner-down step.
-async fn spawn_cosigner(state: Arc<CosignerState>) -> (Url, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+// The JoinHandle is the kill switch for the cosigner-down step. mTLS since M8:
+// the task owns its Arc'd materials (serve_mtls borrows across an await).
+async fn spawn_cosigner(
+    state: Arc<CosignerState>,
+    tls: Arc<TlsMaterials>,
+) -> (Url, tokio::task::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let handle =
-        tokio::spawn(async move { axum::serve(listener, cosigner_router(state)).await.unwrap() });
+    let handle = tokio::spawn(async move {
+        serve_mtls(listener, cosigner_router(state), &tls)
+            .await
+            .unwrap()
+    });
     // trailing slash: RemoteBackend joins "dkg"/"sign" onto this base (remote.rs)
-    (Url::parse(&format!("http://{addr}/")).unwrap(), handle)
+    (Url::parse(&format!("https://{addr}/")).unwrap(), handle)
 }
 
-fn api_router(urls: &[Url; 2], active: Option<Address>) -> Router {
+fn api_router(urls: &[Url; 2], active: Option<Address>, tls: &TlsMaterials) -> Router {
     let provider = sovra_eth::http_provider("http://127.0.0.1:9") // dummy, sign never touches RPC
         .unwrap()
         .erased();
     api_router_fn(AppState::new(
         provider,
-        RemoteBackend::new(urls[0].clone(), urls[1].clone()),
+        RemoteBackend::new(urls[0].clone(), urls[1].clone(), tls).unwrap(),
         active,
     ))
 }
 
-async fn call(router: &Router, req: Request<Body>) -> (StatusCode, bytes::Bytes) {
-    let resp = router.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, body)
-}
-
-fn unsigned_tx(value: u64) -> (Bytes, B256) {
-    let prepared = prepare(TxIntent {
-        chain_id: 11155111,
-        nonce: 0,
-        to: Address::from([0x11; 20]),
-        value: U256::from(value),
-        gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
-        data: Default::default(),
-    })
-    .unwrap();
-    (encode_unsigned(&prepared.tx), prepared.signing_hash)
-}
+// `call`, `unsigned_tx`, `post_json`, `get`, `json` come from test_helpers.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn split_flow() {
     let dir = tempfile::tempdir().unwrap();
-    let relay_url = start_hub().await;
+    let tls = test_tls();
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
 
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
     // party_vks is positional by party id (cosigner state.rs) — 0 gets 1's vk and vice versa
-    let (url0, _h0) = spawn_cosigner(cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url)).await;
-    let (url1, h1) = spawn_cosigner(cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url)).await;
+    let (url0, _h0) = spawn_cosigner(
+        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url, &tls.cosigners[0]),
+        tls.cosigners[0].clone(),
+    )
+    .await;
+    let (url1, h1) = spawn_cosigner(
+        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url, &tls.cosigners[1]),
+        tls.cosigners[1].clone(),
+    )
+    .await;
     let urls = [url0, url1];
 
-    let probe = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
+    let probe = tls
+        .orchestrator
+        .http_client(Duration::from_secs(5))
         .unwrap();
 
     // 1. fresh recover: nothing provisioned on either cosigner
     let active = orchestrator::recover_active(&probe, &urls).await.unwrap();
     assert_eq!(active, None);
-    let router = api_router(&urls, active);
+    let router = api_router(&urls, active, &tls.orchestrator);
 
     // 2. dkg through the full stack; the address cross-check runs inside RemoteBackend
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
@@ -189,7 +184,7 @@ async fn split_flow() {
     //    addresses agree (it GETs /signer on both and demands consensus)
     let active = orchestrator::recover_active(&probe, &urls).await.unwrap();
     assert_eq!(active, Some(address));
-    let router2 = api_router(&urls, active);
+    let router2 = api_router(&urls, active, &tls.orchestrator);
     let (status, body) = call(&router2, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -206,10 +201,10 @@ async fn split_flow() {
 
     // recovery refuses to answer with a cosigner unreachable.
     // Fresh client on purpose: `probe`'s keep-alive pool still holds live
-    // connections to cosigner 1 (axum's per-connection tasks outlive the abort).
-    let probe2 = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
+    // connections to cosigner 1 (per-connection tasks outlive the abort).
+    let probe2 = tls
+        .orchestrator
+        .http_client(Duration::from_secs(5))
         .unwrap();
     let err = orchestrator::recover_active(&probe2, &urls)
         .await
@@ -219,7 +214,7 @@ async fn split_flow() {
     // 7. cosigner-down sign -> 502 with the generic no-leak body.
     //    Fresh router == fresh RemoteBackend == fresh reqwest pool (same reason),
     //    and a different tx so the digest can't hit any idempotency path.
-    let router3 = api_router(&urls, Some(address));
+    let router3 = api_router(&urls, Some(address), &tls.orchestrator);
     let (raw2, _) = unsigned_tx(2_000_000_000);
     let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
     let (status, body) = call(&router3, post_json("/v1/sign", req2)).await;
@@ -230,13 +225,65 @@ async fn split_flow() {
     );
 }
 
+/// M8 gate: a client that trusts the CA but presents **no identity** is
+/// refused at the TLS handshake — a transport error, never an HTTP status —
+/// and nothing server-side is touched: the full sign path runs clean right
+/// after, proving rejection happened before any handler or op lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_client_cert_is_refused_at_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let tls = test_tls();
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
+    let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
+    let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
+    let (url0, _h0) = spawn_cosigner(
+        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url, &tls.cosigners[0]),
+        tls.cosigners[0].clone(),
+    )
+    .await;
+    let (url1, _h1) = spawn_cosigner(
+        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url, &tls.cosigners[1]),
+        tls.cosigners[1].clone(),
+    )
+    .await;
+    let urls = [url0, url1];
+    let router = api_router(&urls, None, &tls.orchestrator);
+
+    let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // CA-pinning but identity-less: the handshake itself must fail.
+    let ca_pem = std::fs::read(tls.ca_path()).unwrap();
+    let anon = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .tls_certs_only([reqwest::Certificate::from_pem(&ca_pem).unwrap()])
+        .build()
+        .unwrap();
+    let refused = anon
+        .post(urls[0].join("sign").unwrap())
+        .json(&serde_json::json!({}))
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "expected a transport error, got {refused:?}"
+    );
+
+    // Server untouched by the refused caller: a legitimate sign runs clean.
+    let (raw, _) = unsigned_tx(1_000_000_000);
+    let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
+    let (status, _) = call(&router, post_json("/v1/sign", req)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// M7 gate, both parties deny: a tx over the value ceiling gets a fast 403
 /// attributing the veto to BOTH parties, nothing is signed or cached, and a
 /// compliant tx signs right afterwards (every op lock was freed).
 #[tokio::test(flavor = "multi_thread")]
 async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
     let dir = tempfile::tempdir().unwrap();
-    let relay_url = start_hub().await;
+    let tls = test_tls();
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
 
@@ -245,26 +292,34 @@ async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
         max_value_wei: U256::from(1_500_000_000u64),
         ..permissive_policy()
     };
-    let (url0, _h0) = spawn_cosigner(cosigner_state_with_policy(
-        0,
-        &sk0,
-        &sk1,
-        dir.path(),
-        &relay_url,
-        ceiling.clone(),
-    ))
+    let (url0, _h0) = spawn_cosigner(
+        cosigner_state_with_policy(
+            0,
+            &sk0,
+            &sk1,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[0],
+            ceiling.clone(),
+        ),
+        tls.cosigners[0].clone(),
+    )
     .await;
-    let (url1, _h1) = spawn_cosigner(cosigner_state_with_policy(
-        1,
-        &sk1,
-        &sk0,
-        dir.path(),
-        &relay_url,
-        ceiling,
-    ))
+    let (url1, _h1) = spawn_cosigner(
+        cosigner_state_with_policy(
+            1,
+            &sk1,
+            &sk0,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[1],
+            ceiling,
+        ),
+        tls.cosigners[1].clone(),
+    )
     .await;
     let urls = [url0, url1];
-    let router = api_router(&urls, None);
+    let router = api_router(&urls, None, &tls.orchestrator);
 
     let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
@@ -304,7 +359,8 @@ async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn heterogeneous_policy_veto_names_the_denier() {
     let dir = tempfile::tempdir().unwrap();
-    let relay_url = start_hub().await;
+    let tls = test_tls();
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
 
@@ -312,26 +368,34 @@ async fn heterogeneous_policy_veto_names_the_denier() {
         max_value_wei: U256::from(1_500_000_000u64),
         ..permissive_policy()
     };
-    let (url0, _h0) = spawn_cosigner(cosigner_state_with_policy(
-        0,
-        &sk0,
-        &sk1,
-        dir.path(),
-        &relay_url,
-        permissive_policy(), // party 0 allows
-    ))
+    let (url0, _h0) = spawn_cosigner(
+        cosigner_state_with_policy(
+            0,
+            &sk0,
+            &sk1,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[0],
+            permissive_policy(), // party 0 allows
+        ),
+        tls.cosigners[0].clone(),
+    )
     .await;
-    let (url1, _h1) = spawn_cosigner(cosigner_state_with_policy(
-        1,
-        &sk1,
-        &sk0,
-        dir.path(),
-        &relay_url,
-        strict, // party 1 vetoes
-    ))
+    let (url1, _h1) = spawn_cosigner(
+        cosigner_state_with_policy(
+            1,
+            &sk1,
+            &sk0,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[1],
+            strict, // party 1 vetoes
+        ),
+        tls.cosigners[1].clone(),
+    )
     .await;
     let urls = [url0, url1];
-    let router = api_router(&urls, None);
+    let router = api_router(&urls, None, &tls.orchestrator);
 
     let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);

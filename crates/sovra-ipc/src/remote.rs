@@ -27,6 +27,7 @@ use crate::{
         CORRELATION_HEADER, CORRELATION_ID, SignParts, SignerInfo, StartDkgRequest,
         StartSignRequest,
     },
+    tls::{TlsError, TlsMaterials},
     types::IpcError,
 };
 
@@ -61,14 +62,22 @@ impl MpcBackend for RemoteBackend {
 }
 
 impl RemoteBackend {
-    pub fn new(cosigner0: Url, cosigner1: Url) -> Self {
-        Self {
-            cosigners: [cosigner0, cosigner1],
-            http: reqwest::Client::builder()
-                .timeout(HTTP_TIMEOUT)
-                .build()
-                .expect("reqwest client with static config"),
+    /// The client pins the project CA and presents the orchestrator's leaf
+    /// (mTLS on the control plane); a non-`https` cosigner URL is refused
+    /// here so misconfiguration fails at startup, not as a handshake error.
+    pub fn new(cosigner0: Url, cosigner1: Url, materials: &TlsMaterials) -> Result<Self, TlsError> {
+        for url in [&cosigner0, &cosigner1] {
+            if url.scheme() != "https" {
+                return Err(TlsError::PlainScheme {
+                    url: url.to_string(),
+                    expected: "https",
+                });
+            }
         }
+        Ok(Self {
+            cosigners: [cosigner0, cosigner1],
+            http: materials.http_client(HTTP_TIMEOUT)?,
+        })
     }
 
     /// POST the same request to both cosigners; both must succeed and agree.

@@ -20,6 +20,11 @@ pub struct Config {
     /// No default on purpose: a cosigner without a policy file is a blind
     /// signer, so a missing key must fail config load, not fall back.
     pub policy_path: String,
+    /// Same rule as `policy_path` for all three TLS keys: a cosigner without
+    /// mTLS material is an open signer — refuse to start, no plaintext mode.
+    pub tls_ca_path: String,
+    pub tls_cert_path: String,
+    pub tls_key_path: String,
     #[serde(default = "default_relay_url")]
     pub relay_url: String,
     pub peer_verifying_key: Option<String>,
@@ -31,7 +36,7 @@ fn default_bind_addr() -> String {
     "127.0.0.1:4100".into()
 }
 fn default_relay_url() -> String {
-    "ws://127.0.0.1:3100/ws".into()
+    "wss://127.0.0.1:3100/ws".into()
 }
 fn default_ttl_secs() -> u64 {
     60
@@ -53,5 +58,40 @@ impl Config {
             )));
         }
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn write_config(dir: &tempfile::TempDir, body: &str) -> String {
+        let path = dir.path().join("cosigner.toml");
+        std::fs::write(&path, body).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    const REQUIRED_SANS_TLS: &str = concat!(
+        "party_id = 0\n",
+        "data_dir = \"data\"\n",
+        "policy_path = \"policy.toml\"\n",
+    );
+
+    /// Startup mirror of the policy rule: a config without TLS material must
+    /// not load — there is no plaintext mode to fall back to.
+    #[test]
+    fn missing_tls_keys_refuse_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(&dir, REQUIRED_SANS_TLS);
+        assert!(super::Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn full_config_loads_and_defaults_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{REQUIRED_SANS_TLS}tls_ca_path = \"ca.pem\"\ntls_cert_path = \"c.pem\"\ntls_key_path = \"k.pem\"\n"
+        );
+        let cfg = super::Config::load(&write_config(&dir, &body)).unwrap();
+        assert_eq!(cfg.bind_addr, "127.0.0.1:4100"); // serde default applied
+        assert_eq!(cfg.ttl_secs, 60);
     }
 }

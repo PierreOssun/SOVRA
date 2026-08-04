@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
+sovra-certs = { workspace = true }
 sovra-cosigner = { workspace = true }
 alloy-primitives = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }

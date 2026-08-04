@@ -7,7 +7,9 @@ publish = false
 [dependencies]
 sovra-mpc = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
-tokio-tungstenite = { workspace = true }
+# rustls-tls-webpki-roots is the only public route to Connector::Rustls; the
+# webpki roots it pulls go unused — WsRelay always passes an explicit connector.
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "net", "time"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
@@ -19,3 +21,15 @@ rand = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+axum-server = { workspace = true }
+
+[features]
+# xtask-only: reqwest's blocking runtime for the synchronous readiness probes.
+# The async binaries (sovra-api, sovra-cosigner) never enable this.
+blocking = ["reqwest/blocking"]
+
+[dev-dependencies]
+sovra-certs = { workspace = true }
+tempfile = { workspace = true }

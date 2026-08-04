@@ -1,8 +1,9 @@
 //! xtask — one-command local launcher (the cargo-xtask pattern). `cargo xtask up`
-//! seeds each cosigner's identity on first run (loads it after), spawns the
-//! orchestrator + two cosigners wired together in a 3-pane tmux window, then runs
-//! the one-time DKG so the system is immediately sign-ready. `cargo xtask down`
-//! tears the session down.
+//! seeds each cosigner's identity and the TLS material (project CA + one leaf
+//! per process) on first run (loads them after), spawns the orchestrator + two
+//! cosigners wired together in a 3-pane tmux window, then runs the one-time DKG
+//! so the system is immediately sign-ready. `cargo xtask down` tears the
+//! session down; `cargo xtask certs` provisions the TLS material standalone.
 //!
 //! Why a Rust crate instead of a shell script: the pairing bootstrap must generate
 //! ed25519 identities and pin each peer's verifying key *before* any process starts
@@ -47,6 +48,16 @@ enum Cmd {
     Down,
     /// Run every local CI check in sequence, stopping at the first failure.
     Ci,
+    /// Seed-or-load the project CA and one leaf per process under `certs/`.
+    /// Re-runs are additive (existing material is never rewritten) — rotation
+    /// is `rm certs/<name>.*.pem` then re-running this.
+    Certs {
+        /// Extra SAN (DNS name or IP) appended to every leaf — the deployment
+        /// knob: re-issue a deleted leaf with the target host's address.
+        /// Repeatable.
+        #[arg(long)]
+        san: Vec<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -54,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Cmd::Up => up(),
         Cmd::Down => down(),
         Cmd::Ci => ci(),
+        Cmd::Certs { san } => certs(&san),
     }
 }
 
@@ -73,16 +85,17 @@ fn up() -> Result<(), Box<dyn Error>> {
     //    and the on-disk key format. Knowing both verifying keys before any
     //    process starts is what dissolves the pairing chicken-and-egg.
     let mut parties: Vec<(CosignerConfig, String)> = Vec::with_capacity(CONFIGS.len());
-    for config in CONFIGS {
-        let cfg = CosignerConfig::load(
-            root.join(config)
-                .to_str()
-                .ok_or("config path is not UTF-8")?,
-        )?;
+    for cfg in load_cosigner_configs(&root)? {
         let key = identity::load_or_generate(&root.join(&cfg.data_dir))?;
         let vk = alloy_primitives::hex::encode(key.verifying_key().as_bytes());
         parties.push((cfg, vk));
     }
+
+    // 1.5 Same pattern for the TLS material: the CA and every leaf must exist
+    //     before any process starts (each binary refuses to come up without
+    //     its material), and re-runs load rather than regenerate.
+    let party_ids: Vec<u8> = parties.iter().map(|(cfg, _)| cfg.party_id).collect();
+    seed_certs(&root, &party_ids, &[])?;
 
     // 2. Lay out the panes: cosigner0 | cosigner1 on top, orchestrator full-width
     //    below. `-c root` anchors every pane's cwd at the workspace root so the
@@ -201,6 +214,56 @@ fn ci() -> Result<(), Box<dyn Error>> {
         }
     }
     println!("\nall CI checks passed — safe to commit");
+    Ok(())
+}
+
+/// `cargo xtask certs [--san <dns-or-ip>]...` — standalone provisioning for
+/// hand-run binaries and the deployment flow (mint a leaf whose SANs include
+/// the target host, then ship it with the CA *cert* — never `ca.key.pem`).
+fn certs(extra_sans: &[String]) -> Result<(), Box<dyn Error>> {
+    let root = workspace_root();
+    let party_ids: Vec<u8> = load_cosigner_configs(&root)?
+        .iter()
+        .map(|cfg| cfg.party_id)
+        .collect();
+    seed_certs(&root, &party_ids, extra_sans)?;
+    println!("certs ready under {}", root.join("certs").display());
+    Ok(())
+}
+
+/// Load every entry of [`CONFIGS`] with the cosigner's own loader — ids,
+/// ports, and data dirs keep exactly one definition (the TOML files).
+fn load_cosigner_configs(root: &Path) -> Result<Vec<CosignerConfig>, Box<dyn Error>> {
+    CONFIGS
+        .iter()
+        .map(|config| -> Result<CosignerConfig, Box<dyn Error>> {
+            let path = root.join(config);
+            Ok(CosignerConfig::load(
+                path.to_str().ok_or("config path is not UTF-8")?,
+            )?)
+        })
+        .collect()
+}
+
+/// One CA + one leaf per process. The leaf set is derived from the config list
+/// plus the orchestrator, so adding a party is a config file + a re-run, and
+/// nothing here knows the number "2". CN carries the identity a later
+/// role-binding check will read; the file stem is only the on-disk name.
+fn seed_certs(root: &Path, party_ids: &[u8], extra_sans: &[String]) -> Result<(), Box<dyn Error>> {
+    let dir = root.join("certs");
+    let ca = sovra_certs::ensure_ca(&dir)?;
+    let mut sans = sovra_certs::default_sans();
+    sans.extend_from_slice(extra_sans);
+    sovra_certs::ensure_leaf(&dir, "orchestrator", "sovra-orchestrator", &sans, &ca)?;
+    for id in party_ids {
+        sovra_certs::ensure_leaf(
+            &dir,
+            &format!("cosigner{id}"),
+            &format!("sovra-cosigner-{id}"),
+            &sans,
+            &ca,
+        )?;
+    }
     Ok(())
 }
 

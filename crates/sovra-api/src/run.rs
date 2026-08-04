@@ -37,10 +37,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let hub = sovra_ipc::hub::ws_router(RelayHub::default());
     tracing::info!("relay hub on {}", config.relay_bind);
 
+    // Fail-closed: no TLS material, no process (same rule as the cosigners).
+    let tls = sovra_ipc::tls::TlsMaterials::load(
+        &config.tls_ca_path,
+        &config.tls_cert_path,
+        &config.tls_key_path,
+    )?;
+
     // Bounded retry: cosigners start first (RUN.md), but give them ~10s of grace.
-    let probe = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let probe = tls.http_client(Duration::from_secs(5))?;
     let active = recover_with_retry(&probe, &cosigners).await?;
     if let Some(address) = active {
         tracing::info!(%address, "recovered active dkg generation");
@@ -48,7 +53,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::new(
         provider,
-        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone()),
+        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone(), &tls)?,
         active,
     );
     let api_listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;

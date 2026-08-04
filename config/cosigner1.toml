@@ -3,3 +3,7 @@ bind_addr = "127.0.0.1:4101"
 data_dir = "data/cosigner1"
 relay_url = "ws://127.0.0.1:3100/ws"
 policy_path = "config/policy1.toml"
+# mTLS material (seeded by `cargo xtask certs`); missing files abort startup
+tls_ca_path = "certs/ca.cert.pem"
+tls_cert_path = "certs/cosigner1.cert.pem"
+tls_key_path = "certs/cosigner1.key.pem"

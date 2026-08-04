@@ -4605,6 +4605,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sovra-certs",
  "sovra-cosigner",
  "sovra-eth",
  "sovra-ipc",
@@ -6100,6 +6101,7 @@ dependencies = [
  "serde_json",
  "sovra-certs",
  "sovra-cosigner",
+ "sovra-ipc",
 ]
 
 [[package]]

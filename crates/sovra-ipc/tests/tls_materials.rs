@@ -17,7 +17,7 @@ fn materials(dir: &std::path::Path) -> TlsMaterials {
         &ca,
     )
     .expect("ensure_leaf");
-    TlsMaterials::load(&dir.join(sovra_certs::CA_CERT_FILE), &leaf.cert, &leaf.key)
+    TlsMaterials::load(dir.join(sovra_certs::CA_CERT_FILE), &leaf.cert, &leaf.key)
         .expect("materials load")
 }
 

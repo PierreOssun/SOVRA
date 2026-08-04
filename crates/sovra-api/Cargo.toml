@@ -25,7 +25,9 @@ tracing = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
-reqwest = { workspace = true }
+# "rustls" made explicit: the api relies on the same mTLS client stack as
+# sovra-ipc, not on feature unification happening to enable it.
+reqwest = { workspace = true, features = ["json", "rustls"] }
 
 [dev-dependencies]
 alloy-consensus = { workspace = true }
@@ -35,3 +37,4 @@ tempfile = { workspace = true }
 ed25519-dalek = { workspace = true }
 sovra-cosigner = { workspace = true }
 sovra-policy = { workspace = true }
+sovra-certs = { workspace = true }

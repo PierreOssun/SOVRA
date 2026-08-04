@@ -53,13 +53,23 @@ pub enum TlsError {
     Http(#[from] reqwest::Error),
     #[error("serving TLS: {0}")]
     Serve(#[from] std::io::Error),
+    /// Fail at the *scheme*, at startup: a plaintext URL would otherwise
+    /// surface as a confusing handshake error at the peer instead of a
+    /// config error at the source.
+    #[error("{url}: internal peers must be reached over {expected} — plaintext is refused")]
+    PlainScheme { url: String, expected: &'static str },
 }
 
 impl TlsMaterials {
     /// Load CA cert, own leaf cert (chain), and own key. Any missing or
     /// unparsable file fails here with its path — startup is the only caller,
     /// and a process without TLS material must not come up.
-    pub fn load(ca: &Path, cert: &Path, key: &Path) -> Result<Self, TlsError> {
+    pub fn load(
+        ca: impl AsRef<Path>,
+        cert: impl AsRef<Path>,
+        key: impl AsRef<Path>,
+    ) -> Result<Self, TlsError> {
+        let (ca, cert, key) = (ca.as_ref(), cert.as_ref(), key.as_ref());
         let read = |path: &Path| {
             std::fs::read(path).map_err(|source| TlsError::Read {
                 path: path.to_path_buf(),
@@ -161,6 +171,8 @@ pub async fn serve_mtls(
     router: Router,
     materials: &TlsMaterials,
 ) -> Result<(), TlsError> {
+    // tokio refuses blocking fds; axum-server 0.8 registers the listener as-is.
+    listener.set_nonblocking(true)?;
     let config =
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(materials.server_config()?));
     axum_server::from_tcp_rustls(listener, config)?

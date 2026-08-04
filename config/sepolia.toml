@@ -1,5 +1,10 @@
 rpc_url = "https://ethereum-sepolia-rpc.publicnode.com"
-cosigner0_url = "http://127.0.0.1:4100"
-cosigner1_url = "http://127.0.0.1:4101"
+# https only: RemoteBackend refuses plaintext cosigner URLs at startup
+cosigner0_url = "https://127.0.0.1:4100"
+cosigner1_url = "https://127.0.0.1:4101"
 # internal MPC relay hub — must never share the public port
 relay_bind = "127.0.0.1:3100"
+# mTLS material (seeded by `cargo xtask certs`); missing files abort startup
+tls_ca_path = "certs/ca.cert.pem"
+tls_cert_path = "certs/orchestrator.cert.pem"
+tls_key_path = "certs/orchestrator.key.pem"

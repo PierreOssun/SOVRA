@@ -95,7 +95,7 @@ fn up() -> Result<(), Box<dyn Error>> {
     //     before any process starts (each binary refuses to come up without
     //     its material), and re-runs load rather than regenerate.
     let party_ids: Vec<u8> = parties.iter().map(|(cfg, _)| cfg.party_id).collect();
-    seed_certs(&root, &party_ids, &[])?;
+    let orch_leaf = seed_certs(&root, &party_ids, &[])?;
 
     // 2. Lay out the panes: cosigner0 | cosigner1 on top, orchestrator full-width
     //    below. `-c root` anchors every pane's cwd at the workspace root so the
@@ -130,21 +130,30 @@ fn up() -> Result<(), Box<dyn Error>> {
     //    startup recovery hard-exits after ~10s of unreachable cosigners, and
     //    cargo's build lock makes pane start order nondeterministic — send order
     //    guarantees nothing about bind order.
-    let client = reqwest::blocking::Client::builder()
-        // Above the system's own DKG budget (cosigner ttl 60s, orchestrator HTTP
-        // timeout 90s) — reqwest's 30s default would abort an in-budget DKG.
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    //    The cosigner ports are mTLS-only: probe with the orchestrator's own
+    //    leaf (any project-CA leaf authorizes). The public :3000 stays
+    //    plaintext, so DKG provisioning keeps a separate bare client.
+    let tls = sovra_ipc::tls::TlsMaterials::load(
+        root.join("certs").join(sovra_certs::CA_CERT_FILE),
+        &orch_leaf.cert,
+        &orch_leaf.key,
+    )?;
+    let cosigner_probe = tls.blocking_http_client(Duration::from_secs(120))?;
     for (cfg, _) in &parties {
         wait_for(
-            &client,
-            &format!("http://{}/health", cfg.bind_addr),
+            &cosigner_probe,
+            &format!("https://{}/health", cfg.bind_addr),
             "cosigner",
         )?;
     }
     send(&bottom, "cargo run -p sovra-api")?;
 
     // 5. Provision DKG on first run; idempotent thereafter.
+    let client = reqwest::blocking::Client::builder()
+        // Above the system's own DKG budget (cosigner ttl 60s, orchestrator HTTP
+        // timeout 90s) — reqwest's 30s default would abort an in-budget DKG.
+        .timeout(Duration::from_secs(120))
+        .build()?;
     provision_dkg(&client, &api_url())?;
 
     // 6. Hand the terminal over to the running session.
@@ -249,12 +258,17 @@ fn load_cosigner_configs(root: &Path) -> Result<Vec<CosignerConfig>, Box<dyn Err
 /// plus the orchestrator, so adding a party is a config file + a re-run, and
 /// nothing here knows the number "2". CN carries the identity a later
 /// role-binding check will read; the file stem is only the on-disk name.
-fn seed_certs(root: &Path, party_ids: &[u8], extra_sans: &[String]) -> Result<(), Box<dyn Error>> {
+fn seed_certs(
+    root: &Path,
+    party_ids: &[u8],
+    extra_sans: &[String],
+) -> Result<sovra_certs::LeafPaths, Box<dyn Error>> {
     let dir = root.join("certs");
     let ca = sovra_certs::ensure_ca(&dir)?;
     let mut sans = sovra_certs::default_sans();
     sans.extend_from_slice(extra_sans);
-    sovra_certs::ensure_leaf(&dir, "orchestrator", "sovra-orchestrator", &sans, &ca)?;
+    let orchestrator =
+        sovra_certs::ensure_leaf(&dir, "orchestrator", "sovra-orchestrator", &sans, &ca)?;
     for id in party_ids {
         sovra_certs::ensure_leaf(
             &dir,
@@ -264,7 +278,9 @@ fn seed_certs(root: &Path, party_ids: &[u8], extra_sans: &[String]) -> Result<()
             &ca,
         )?;
     }
-    Ok(())
+    // The orchestrator leaf doubles as xtask's own client identity for the
+    // mTLS readiness probes.
+    Ok(orchestrator)
 }
 
 /// Wait for the orchestrator to come up, then run the one-time DKG if it hasn't

@@ -13,19 +13,37 @@ use sovra_cosigner::{run::build_router, state::CosignerState};
 use sovra_ipc::{
     control::*,
     hub::{RelayHub, ws_router},
+    tls::{TlsMaterials, serve_mtls},
 };
 use sovra_state::SignerStore;
 use tower::ServiceExt;
 
-async fn start_hub() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+/// One CA + one both-EKU leaf covers every role in these tests: the hub
+/// serves with it and both cosigners dial with it.
+fn materials(dir: &std::path::Path) -> Arc<TlsMaterials> {
+    let ca = sovra_certs::ensure_ca(dir).unwrap();
+    let leaf = sovra_certs::ensure_leaf(
+        dir,
+        "party",
+        "sovra-party",
+        &sovra_certs::default_sans(),
+        &ca,
+    )
+    .unwrap();
+    Arc::new(
+        TlsMaterials::load(dir.join(sovra_certs::CA_CERT_FILE), &leaf.cert, &leaf.key).unwrap(),
+    )
+}
+
+async fn start_hub(tls: Arc<TlsMaterials>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, ws_router(RelayHub::default()))
+        serve_mtls(listener, ws_router(RelayHub::default()), &tls)
             .await
             .unwrap()
     });
-    format!("ws://{addr}/ws")
+    format!("wss://{addr}/ws")
 }
 
 /// Wide-open policy so pre-M7 scenarios keep exercising the MPC path;
@@ -40,7 +58,7 @@ fn permissive_policy() -> sovra_policy::Policy {
 }
 
 /// Two cosigners, keys exchanged, pointed at one hub. Returns (router0, router1).
-fn two_cosigners(dir: &std::path::Path, relay_url: &str) -> (Router, Router) {
+fn two_cosigners(dir: &std::path::Path, relay_url: &str, tls: &TlsMaterials) -> (Router, Router) {
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
     let mk = |party_id: u8, sk: &SigningKey, peer: &SigningKey| {
@@ -50,6 +68,7 @@ fn two_cosigners(dir: &std::path::Path, relay_url: &str) -> (Router, Router) {
             peer_vk: Some(peer.verifying_key()),
             store: SignerStore::open(dir.join(format!("party{party_id}"))).unwrap(),
             relay_url: relay_url.to_owned(),
+            relay_tls: tls.ws_client_config().unwrap(),
             ttl: Duration::from_secs(60),
             op: tokio::sync::Mutex::new(()),
             policy: permissive_policy(),
@@ -94,8 +113,9 @@ fn unsigned_tx_bytes() -> Bytes {
 #[tokio::test(flavor = "multi_thread")]
 async fn joint_dkg_then_sign() {
     let dir = tempfile::tempdir().unwrap();
-    let relay_url = start_hub().await;
-    let (r0, r1) = two_cosigners(dir.path(), &relay_url);
+    let tls = materials(dir.path());
+    let relay_url = start_hub(tls.clone()).await;
+    let (r0, r1) = two_cosigners(dir.path(), &relay_url, &tls);
 
     // dkg: one instance, both parties, concurrently — RemoteBackend's job, played here by the test
     let dkg = StartDkgRequest {
@@ -140,7 +160,8 @@ async fn sign_rejects_undecodable_bytes_before_any_mpc() {
     // Deliberately dead relay URL: if the handler dialed the hub before
     // decoding, this would 502 — a 422 proves rejection happens first.
     let dir = tempfile::tempdir().unwrap();
-    let (r0, _r1) = two_cosigners(dir.path(), "ws://127.0.0.1:9/ws");
+    let tls = materials(dir.path());
+    let (r0, _r1) = two_cosigners(dir.path(), "wss://127.0.0.1:9/ws", &tls);
 
     let garbage = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
@@ -164,13 +185,15 @@ async fn sign_denied_by_policy_before_any_mpc() {
     // the store is empty on purpose — a 403 (not 409) proves the veto fires
     // before shard load and peer checks; the dead relay URL proves no dial.
     let dir = tempfile::tempdir().unwrap();
+    let tls = materials(dir.path());
     let sk = SigningKey::generate(&mut rand::rngs::OsRng);
     let state = Arc::new(CosignerState {
         party_id: 0,
         signing_key: sk,
         peer_vk: None,
         store: SignerStore::open(dir.path().join("party0")).unwrap(),
-        relay_url: "ws://127.0.0.1:9/ws".into(),
+        relay_url: "wss://127.0.0.1:9/ws".into(),
+        relay_tls: tls.ws_client_config().unwrap(),
         ttl: Duration::from_secs(10),
         op: tokio::sync::Mutex::new(()),
         policy: sovra_policy::Policy {

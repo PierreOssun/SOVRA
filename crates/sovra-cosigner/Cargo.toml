@@ -21,11 +21,15 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 axum = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+# Names the Arc<rustls::ClientConfig> in CosignerState; the crate is already
+# in the tree via sovra-ipc.
+rustls = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
+sovra-certs = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }

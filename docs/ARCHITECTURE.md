@@ -64,7 +64,7 @@ sovra-mpc-poc/
 │   ├── sovra-cosigner/      # Cosigner binary (used for both A and B)
 │   ├── sovra-cli/           # Operator CLI (talks to Orchestrator only)
 │   ├── sovra-types/         # Shared identifiers, session states, errors
-│   ├── sovra-ipc/           # gRPC service definitions and mTLS transport
+│   ├── sovra-ipc/           # HTTP/JSON control + WS relay, mTLS transport
 │   ├── sovra-mpc/           # ThresholdSigner trait
 │   ├── sovra-mpc-dkls23-silence/  # Silence Labs DKLs23 adapter
 │   ├── sovra-eth/           # Tx prep, encoding, verification, broadcast

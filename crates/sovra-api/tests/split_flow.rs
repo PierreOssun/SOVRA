@@ -26,16 +26,17 @@ use sovra_state::SignerStore;
 use test_helpers::*;
 use url::Url;
 
-// copied from cosigner_flow.rs
-async fn start_hub() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+// copied from cosigner_flow.rs; the hub rides the orchestrator's materials,
+// mirroring run.rs
+async fn start_hub(tls: Arc<TlsMaterials>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, ws_router(RelayHub::default()))
+        serve_mtls(listener, ws_router(RelayHub::default()), &tls)
             .await
             .unwrap()
     });
-    format!("ws://{addr}/ws")
+    format!("wss://{addr}/ws")
 }
 
 /// Wide-open policy for the pre-M7 scenarios; deny cases build their own.
@@ -55,16 +56,19 @@ fn cosigner_state(
     peer: &SigningKey,
     dir: &std::path::Path,
     relay_url: &str,
+    tls: &TlsMaterials,
 ) -> Arc<CosignerState> {
-    cosigner_state_with_policy(party_id, sk, peer, dir, relay_url, permissive_policy())
+    cosigner_state_with_policy(party_id, sk, peer, dir, relay_url, tls, permissive_policy())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cosigner_state_with_policy(
     party_id: u8,
     sk: &SigningKey,
     peer: &SigningKey,
     dir: &std::path::Path,
     relay_url: &str,
+    tls: &TlsMaterials,
     policy: sovra_policy::Policy,
 ) -> Arc<CosignerState> {
     Arc::new(CosignerState {
@@ -73,6 +77,7 @@ fn cosigner_state_with_policy(
         peer_vk: Some(peer.verifying_key()),
         store: SignerStore::open(dir.join(format!("party{party_id}"))).unwrap(),
         relay_url: relay_url.to_owned(),
+        relay_tls: tls.ws_client_config().unwrap(),
         ttl: Duration::from_secs(10),
         op: tokio::sync::Mutex::new(()),
         policy,
@@ -113,18 +118,18 @@ fn api_router(urls: &[Url; 2], active: Option<Address>, tls: &TlsMaterials) -> R
 async fn split_flow() {
     let dir = tempfile::tempdir().unwrap();
     let tls = test_tls();
-    let relay_url = start_hub().await;
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
 
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
     // party_vks is positional by party id (cosigner state.rs) — 0 gets 1's vk and vice versa
     let (url0, _h0) = spawn_cosigner(
-        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url),
+        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url, &tls.cosigners[0]),
         tls.cosigners[0].clone(),
     )
     .await;
     let (url1, h1) = spawn_cosigner(
-        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url),
+        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url, &tls.cosigners[1]),
         tls.cosigners[1].clone(),
     )
     .await;
@@ -228,16 +233,16 @@ async fn split_flow() {
 async fn no_client_cert_is_refused_at_handshake() {
     let dir = tempfile::tempdir().unwrap();
     let tls = test_tls();
-    let relay_url = start_hub().await;
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
     let (url0, _h0) = spawn_cosigner(
-        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url),
+        cosigner_state(0, &sk0, &sk1, dir.path(), &relay_url, &tls.cosigners[0]),
         tls.cosigners[0].clone(),
     )
     .await;
     let (url1, _h1) = spawn_cosigner(
-        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url),
+        cosigner_state(1, &sk1, &sk0, dir.path(), &relay_url, &tls.cosigners[1]),
         tls.cosigners[1].clone(),
     )
     .await;
@@ -278,7 +283,7 @@ async fn no_client_cert_is_refused_at_handshake() {
 async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let tls = test_tls();
-    let relay_url = start_hub().await;
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
 
@@ -288,12 +293,28 @@ async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
         ..permissive_policy()
     };
     let (url0, _h0) = spawn_cosigner(
-        cosigner_state_with_policy(0, &sk0, &sk1, dir.path(), &relay_url, ceiling.clone()),
+        cosigner_state_with_policy(
+            0,
+            &sk0,
+            &sk1,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[0],
+            ceiling.clone(),
+        ),
         tls.cosigners[0].clone(),
     )
     .await;
     let (url1, _h1) = spawn_cosigner(
-        cosigner_state_with_policy(1, &sk1, &sk0, dir.path(), &relay_url, ceiling),
+        cosigner_state_with_policy(
+            1,
+            &sk1,
+            &sk0,
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[1],
+            ceiling,
+        ),
         tls.cosigners[1].clone(),
     )
     .await;
@@ -339,7 +360,7 @@ async fn policy_deny_names_both_parties_then_compliant_sign_succeeds() {
 async fn heterogeneous_policy_veto_names_the_denier() {
     let dir = tempfile::tempdir().unwrap();
     let tls = test_tls();
-    let relay_url = start_hub().await;
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
 
@@ -354,6 +375,7 @@ async fn heterogeneous_policy_veto_names_the_denier() {
             &sk1,
             dir.path(),
             &relay_url,
+            &tls.cosigners[0],
             permissive_policy(), // party 0 allows
         ),
         tls.cosigners[0].clone(),
@@ -366,6 +388,7 @@ async fn heterogeneous_policy_veto_names_the_denier() {
             &sk0,
             dir.path(),
             &relay_url,
+            &tls.cosigners[1],
             strict, // party 1 vetoes
         ),
         tls.cosigners[1].clone(),

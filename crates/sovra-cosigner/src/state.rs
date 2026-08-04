@@ -9,7 +9,7 @@
 //! store's on-disk contents; no locks needed beyond `op`.
 //! Pattern: shared-state cell, standard axum.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::B256;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -24,6 +24,10 @@ pub struct CosignerState {
     pub peer_vk: Option<VerifyingKey>,
     pub store: SignerStore,
     pub relay_url: String,
+    /// Client config for dialing the hub (`WsRelay::connect`): pins the
+    /// project CA, presents this party's leaf. Built once at startup from the
+    /// same materials that serve the control API.
+    pub relay_tls: Arc<rustls::ClientConfig>,
     pub ttl: Duration,
     pub op: tokio::sync::Mutex<()>,
     /// This party's local signing policy — evaluated on every `/sign` before

@@ -52,19 +52,22 @@ policy before any MPC round.
 
 ## 3. Runtime topology
 
-Two planes: **control** (HTTP/JSON, api commands both cosigners and
-cross-checks their answers) and **relay** (WebSocket, opaque MPC round
-messages through the hub *inside* the api process). Beyond the diagrams
-below, cosigners also expose `GET /identity` and `GET /health`, and the api
-exposes `GET /v1/dkg` (returns the active signer address).
+Two planes: **control** (HTTPS/JSON, api commands both cosigners and
+cross-checks their answers) and **relay** (WebSocket over TLS, opaque MPC
+round messages through the hub *inside* the api process). Both internal
+planes are **mTLS against the project CA** (`certs/`, seeded by `cargo xtask
+certs`); the CLI-facing :3000 is plaintext loopback by decision — the custody
+boundary is the cosigner, not the orchestrator. Beyond the diagrams below,
+cosigners also expose `GET /identity` and `GET /health`, and the api exposes
+`GET /v1/dkg` (returns the active signer address).
 
 ```mermaid
 graph LR
-    CLI[sovra-cli] -->|HTTP :3000| API["sovra-api<br/>+ relay hub :3100"]
-    API -->|control| C0["cosigner 0<br/>:4100 + shard"]
-    API -->|control| C1["cosigner 1<br/>:4101 + shard"]
-    C0 <-.->|WS relay| API
-    C1 <-.->|WS relay| API
+    CLI[sovra-cli] -->|HTTP :3000 plaintext loopback| API["sovra-api<br/>+ relay hub :3100"]
+    API -->|control, mTLS| C0["cosigner 0<br/>:4100 + shard"]
+    API -->|control, mTLS| C1["cosigner 1<br/>:4101 + shard"]
+    C0 <-.->|WS relay, mTLS| API
+    C1 <-.->|WS relay, mTLS| API
     API -->|JSON-RPC| RPC[(Ethereum RPC)]
 ```
 
@@ -125,6 +128,12 @@ out its ttl before the 403 lands — by then every op lock is free again.
   the digest at the shard, fail-closed (no policy file → refuse to start),
   before any MPC message. Api-side checks are defense in depth, not the
   security boundary.
+- **Every internal socket is mTLS**: servers require a leaf signed by the
+  project CA, clients pin that CA (never WebPKI) and present their own leaf —
+  TLS material missing at startup → refuse to start, plaintext schemes
+  (`http`/`ws`) for internal peers → refused as config errors. The ed25519
+  party keys keep authenticating the cosigners *inside* the MPC; mTLS
+  authenticates the transport and the requester — complementary layers.
 - **Key material**: only the two shards, one per cosigner, useless alone. The
   api, CLI, and hub never see keys; the hub shuttles opaque frames only.
 
@@ -147,7 +156,12 @@ The choices, condensed:
 3. **The relay hub lives in the api and is dumb.** A fourth process is more
    ops for zero gain: the relay is untrusted by design. Authentication lives
    in the MPC setup messages (pinned ed25519 keys); compromising the hub
-   yields denial of service, never a signature.
+   yields denial of service, never a signature. It still requires client
+   certs (M8): server-only TLS would be cryptographically sufficient, but
+   the cert requirement closes the last unauthenticated port — a certless
+   local process could otherwise spray junk frames at a live signing session
+   — and one uniform posture ("every internal socket is mTLS") is simpler to
+   reason about than one special case.
 4. **Transport hides behind `MpcBackend`.** Handlers call `backend.sign()`;
    tests inject the in-process backend, production injects `RemoteBackend`.
    This seam pinned the HTTP contract in tests before the split existed.
@@ -155,9 +169,13 @@ The choices, condensed:
    independently agree (`PartyMismatch` otherwise). Layered timeouts (60s MPC
    run < 90s HTTP) mean a live run is never cut from outside, but a dead peer
    can't wedge anyone — the 60s timeout is also what frees the op lock.
-6. **Consciously deferred:** TLS (loopback-only for now), schema'd
-   contracts, and **control-plane authentication**: policy (M7) now bounds
-   *what* can be signed, but nothing yet bounds *who* may ask — a local
-   agent can still POST to a cosigner's loopback port. The pinned ed25519
-   identities (or mTLS when TLS lands) are the candidate mechanism; next
-   hardening milestone.
+6. **Consciously deferred:** schema'd contracts; **public-API TLS** (:3000
+   is the human/CLI edge on loopback — TLS there means cert distribution to
+   every CLI user for zero custody gain; revisit if :3000 ever leaves the
+   box); **role/party binding from the cert CN** — today any project-CA leaf
+   is authorized on both planes, which is fine while cosigners are trusted
+   parties, but t-of-n with mutually-distrusting operators wants the cosigner
+   to accept only CN `sovra-orchestrator` on `/sign` (the CN already encodes
+   role+party, so this is a connect-info extractor, not a re-issuance);
+   **cert rotation/expiry** (leaves are 2-year; rotation is
+   `rm certs/<name>.*.pem && cargo xtask certs`, no automation yet).

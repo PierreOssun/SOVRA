@@ -9,17 +9,47 @@ single tmux window:
 cargo xtask up
 ```
 
-On the **first** run this seeds each cosigner's identity under `data/cosigner{0,1}/`,
-pins each peer's verifying key, starts all three processes, and runs the one-time
+On the **first** run this seeds each cosigner's identity under `data/cosigner{0,1}/`
+**and the TLS material under `certs/`** (project CA + one leaf per process), pins
+each peer's verifying key, starts all three processes, and runs the one-time
 DKG so the signer address is ready. Later runs **load** the existing identities and
-detect that DKG has already happened. Layout: `cosigner0` / `cosigner1` on top, the
-orchestrator full-width below. Tear it down with:
+certs and detect that DKG has already happened. Layout: `cosigner0` / `cosigner1`
+on top, the orchestrator full-width below. Tear it down with:
 
 ```bash
 cargo xtask down
 ```
 
 Local only. To run the processes individually, see the sections below.
+
+### TLS material (`certs/`)
+
+Every internal socket (cosigner control APIs :4100/:4101, relay hub :3100) is
+**mTLS-only**: servers require a leaf signed by the project CA, clients pin that
+CA and present their own leaf. A process without its material refuses to start,
+so hand-running any binary needs one prior:
+
+```bash
+cargo xtask certs
+```
+
+Re-runs are additive (existing material is never rewritten). The transport now
+bounds *who may ask*, demo:
+
+```bash
+curl -s  http://127.0.0.1:4100/health   # plaintext → connection error
+curl -sk https://127.0.0.1:4100/health  # TLS but no client cert → handshake refused
+```
+
+- **Rotation** (leaves are valid 2 years): `rm certs/<name>.*.pem && cargo xtask certs`.
+  To rotate the **CA**, delete everything in `certs/` — a fresh CA over surviving
+  leaves is refused (they would no longer chain).
+- **Deploying a cosigner to another host** (e.g. the Pi): delete its leaf, re-issue
+  with the host in the SANs — `cargo xtask certs --san 192.168.x.y` — then ship the
+  leaf pair plus `ca.cert.pem` **only**. `ca.key.pem` never leaves the provisioning
+  machine.
+
+The public :3000 stays plaintext loopback — the CLI needs no certs.
 
 ### Driving the system (prepare / sign)
 
@@ -104,6 +134,7 @@ after the allowing party's MPC timeout, ~60s by default).
 ## API server
 
 ```bash
+cargo xtask certs   # first time only — TLS material must exist
 cargo run -p sovra-api
 ```
 
@@ -178,6 +209,7 @@ SEPOLIA_RPC_URL=https://your-node.example.com cargo test -p sovra-eth -- --ignor
 ## Production build
 
 ```bash
+cargo xtask certs   # mTLS material must exist — the binary refuses to start without it
 cargo build --release -p sovra-api
 ./target/release/sovra-api
 ```
@@ -197,3 +229,5 @@ SOVRA_LOG_JSON=1 RUST_LOG=info SOVRA_BIND_ADDR=0.0.0.0:3000 ./target/release/sov
 | `SOVRA_LOG_JSON`  | unset                                          | Set to any value to enable JSON logs |
 | `SOVRA_RPC_URL`   | value from `config/sepolia.toml`               | Ethereum RPC endpoint              |
 | `SOVRA_BIND_ADDR` | `127.0.0.1:3000`                               | TCP address the API listens on     |
+| `SOVRA_TLS_CA_PATH` / `_CERT_PATH` / `_KEY_PATH` | values from `config/sepolia.toml` | Orchestrator mTLS material (the deployment knob) |
+| `SOVRA_COSIGNER_TLS_CA_PATH` / `_CERT_PATH` / `_KEY_PATH` | values from `config/cosigner{0,1}.toml` | Cosigner mTLS material |

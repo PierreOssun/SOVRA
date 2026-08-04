@@ -42,7 +42,8 @@ pub async fn dkg(
         Err(e) => return Err(e.into()),
     }
     let ctx = state.ctx(req.instance)?;
-    let relay = WsRelay::connect(&state.relay_url).await?; // dial per run, 502 on refusal
+    // dial per run, 502 on refusal
+    let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
     let (share, address) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay))
         .await
         .map_err(|_| CosignerError::RunTimeout)??;
@@ -87,7 +88,7 @@ pub async fn sign(
         Err(e) => return Err(e.into()),
     };
     let ctx = state.ctx(req.instance)?;
-    let relay = WsRelay::connect(&state.relay_url).await?;
+    let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
     let parts = tokio::time::timeout(
         state.ttl,
         sign_party(&ctx, &share, prepared.signing_hash, relay),

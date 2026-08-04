@@ -15,13 +15,16 @@
 
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
 use futures_util::{Sink, Stream};
 use sl_mpc_mate::coord::{MessageSendError, Relay};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite, tungstenite::Message};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, WebSocketStream, tungstenite, tungstenite::Message,
+};
 
 use crate::types::IpcError;
 
@@ -30,8 +33,18 @@ pub struct WsRelay {
 }
 
 impl WsRelay {
-    pub async fn connect(url: &str) -> Result<Self, IpcError> {
-        let (inner, _response) = tokio_tungstenite::connect_async(url).await?;
+    /// Dial the hub over mTLS: `tls` pins the project CA and presents this
+    /// party's leaf. The explicit connector is the whole point — tungstenite's
+    /// built-in webpki roots are never consulted. Callers pass `wss://` URLs
+    /// (validated at startup); a `ws://` URL here would silently skip TLS.
+    pub async fn connect(url: &str, tls: Arc<rustls::ClientConfig>) -> Result<Self, IpcError> {
+        let (inner, _response) = tokio_tungstenite::connect_async_tls_with_config(
+            url,
+            None,
+            false,
+            Some(Connector::Rustls(tls)),
+        )
+        .await?;
         Ok(Self { inner })
     }
 }

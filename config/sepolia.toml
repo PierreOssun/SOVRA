@@ -1,10 +1,26 @@
 rpc_url = "https://ethereum-sepolia-rpc.publicnode.com"
-# https only: RemoteBackend refuses plaintext cosigner URLs at startup
-cosigner0_url = "https://127.0.0.1:4100"
-cosigner1_url = "https://127.0.0.1:4101"
 # internal MPC relay hub — must never share the public port
 relay_bind = "127.0.0.1:3100"
 # mTLS material (seeded by `cargo xtask certs`); missing files abort startup
 tls_ca_path = "certs/ca.cert.pem"
 tls_cert_path = "certs/orchestrator.cert.pem"
 tls_key_path = "certs/orchestrator.key.pem"
+
+# t in t-of-n; n is the number of [[cosigners]] entries below.
+threshold = 2
+
+# Preference order: the first t READY parties sign. The cold recovery party
+# (cosigner 2) is listed last so it is only selected when a preferred party
+# is down. https only: RemoteBackend refuses plaintext cosigner URLs at
+# startup. DKG always requires all n parties online.
+[[cosigners]]
+party_id = 0
+url = "https://127.0.0.1:4100"
+
+[[cosigners]]
+party_id = 1
+url = "https://127.0.0.1:4101"
+
+[[cosigners]]
+party_id = 2
+url = "https://127.0.0.1:4102"

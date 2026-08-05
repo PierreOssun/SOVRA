@@ -12,4 +12,10 @@ pub enum IpcError {
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("cosigner http request failed: {0}")]
     Http(String),
+    /// Startup-time misconfiguration of the cosigner set (duplicate party
+    /// ids, threshold out of bounds) — fails process start, never a request.
+    #[error("cosigner set misconfigured: {0}")]
+    Config(String),
+    #[error(transparent)]
+    Tls(#[from] crate::tls::TlsError),
 }

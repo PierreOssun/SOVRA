@@ -19,11 +19,11 @@ use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
 use test_helpers::*;
 
 fn test_router(dir0: &std::path::Path, dir1: &std::path::Path) -> Router {
-    let stores = [
+    let stores = vec![
         SignerStore::open(dir0).unwrap(),
         SignerStore::open(dir1).unwrap(),
     ];
-    let backend = InProcessBackend::new(stores);
+    let backend = InProcessBackend::new(stores, 2);
     let active = backend.recover_active().unwrap();
     let provider = sovra_eth::http_provider("http://127.0.0.1:9")
         .unwrap()
@@ -155,7 +155,7 @@ async fn prepare_requires_dkg() {
 #[test]
 fn recover_rejects_metadata_without_shard() {
     let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let stores = [
+    let stores = vec![
         SignerStore::open(d0.path()).unwrap(),
         SignerStore::open(d1.path()).unwrap(),
     ];
@@ -171,7 +171,7 @@ fn recover_rejects_metadata_without_shard() {
     // Simulate a crash between save_shard's metadata write and shard write.
     std::fs::remove_file(d1.path().join(ACTIVE_SIGNER_ID).join("shard.bin")).unwrap();
 
-    assert!(InProcessBackend::new(stores).recover_active().is_err());
+    assert!(InProcessBackend::new(stores, 2).recover_active().is_err());
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ impl MpcBackend for SlowBackend {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_signs_one_wins_one_conflicts() {
     let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let stores = [
+    let stores = vec![
         SignerStore::open(d0.path()).unwrap(),
         SignerStore::open(d1.path()).unwrap(),
     ];
@@ -242,7 +242,7 @@ async fn concurrent_signs_one_wins_one_conflicts() {
         .erased();
     let router = build_router(AppState::new(
         provider,
-        SlowBackend(InProcessBackend::new(stores)),
+        SlowBackend(InProcessBackend::new(stores, 2)),
         None,
     ));
 

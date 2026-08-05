@@ -1,9 +1,13 @@
 # SOVRA — Process & Crate Architecture
 
-2-of-2 MPC (DKLs23) Ethereum transaction signer. Three processes: one
-orchestrator (`sovra-api`), two cosigners (`sovra-cosigner`), driven by a thin
-HTTP CLI. Nothing spawns anything — all are started independently, cosigners
-first (see `RUN.md`).
+t-of-n MPC (DKLs23) Ethereum transaction signer, deployed as **2-of-3**: one
+orchestrator (`sovra-api`), three cosigners (`sovra-cosigner`) of which
+cosigner 2 is the **cold recovery party** (online for DKG and recovery only),
+driven by a thin HTTP CLI. Nothing spawns anything — all are started
+independently, cosigners first (see `RUN.md`). Every cosigner pins the full
+roster (all parties' ed25519 verifying keys, index = party id) plus the
+threshold; the orchestrator knows only `[{party_id, url}]` in signing
+preference order — it never learns MPC identities.
 
 ## 1. Crates
 
@@ -52,8 +56,11 @@ policy before any MPC round.
 
 ## 3. Runtime topology
 
-Two planes: **control** (HTTPS/JSON, api commands both cosigners and
-cross-checks their answers) and **relay** (WebSocket over TLS, opaque MPC
+Two planes: **control** (HTTPS/JSON, api commands the cosigners and
+cross-checks their answers; DKG goes to all n after a `GET /roster`
+consistency pre-flight, sign goes to the first t *ready* parties in
+preference order — selected before asking, never re-selected on a veto) and
+**relay** (WebSocket over TLS, opaque MPC
 round messages through the hub *inside* the api process). Both internal
 planes are **mTLS against the project CA** (`certs/`, seeded by `cargo xtask
 certs`); the CLI-facing :3000 is plaintext loopback by decision — the custody
@@ -109,14 +116,20 @@ sequenceDiagram
 ```
 
 A policy deny surfaces on `/v1/sign` as **403** with every veto attributed
-(`{"error":"policy denied","vetoes":[{"party":1,"reason":"…"}]}`). In 2-of-2
-either cosigner alone blocks; when policies differ, the allowing party waits
-out its ttl before the 403 lands — by then every op lock is free again.
+(`{"error":"policy denied","vetoes":[{"party":1,"reason":"…"}]}`). Any
+*selected* cosigner alone blocks — a veto is final and never triggers
+failover to another party (outcome-keyed re-selection would be a policy
+bypass); when policies differ, the allowing party waits out its ttl before
+the 403 lands — by then every op lock is free again. Corollary: the effective
+policy is what any t parties jointly allow, so all n policy files (including
+the cold party's) must carry the same baseline.
 
 ## 6. Rules that hold everywhere
 
-- **Startup recovery**: api probes both cosigners' `GET /signer`; both 404 →
-  fresh, same address → active, disagreement → refuses to start.
+- **Startup recovery**: api probes every cosigner's `GET /signer`; needs at
+  least t reachable (the cold party may be down) and all reachable parties in
+  agreement — all 404 → fresh, same address → active, any disagreement →
+  refuses to start.
 - **One MPC op at a time**: api and cosigners `try_lock`; busy = 409, never
   queued. Sign is idempotent per digest (in-memory cache).
 - **Timeouts**: cosigner MPC run 60s (`ttl_secs`) < api per-cosigner HTTP 90s

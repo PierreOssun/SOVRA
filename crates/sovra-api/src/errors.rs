@@ -72,7 +72,9 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "cosigner cross-check failed".to_string(), // a party is lying or misconfigured — not a gateway blip
             ),
-            // In 2-of-2, one veto is enough; the body below names who and why.
+            // One veto from any *selected* party is final — subset selection
+            // happens before asking, never after (a veto must not trigger
+            // failover). The body below names who and why.
             ApiError::Mpc(MpcError::Rejected { .. }) => {
                 (StatusCode::FORBIDDEN, "policy denied".to_string())
             }

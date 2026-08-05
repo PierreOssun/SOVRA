@@ -19,7 +19,7 @@ External actors (calls to the public API, and the Sepolia RPC node) are not comp
 
 ### 1.2 DKG workflow
 
-A one-time ceremony. The Orchestrator triggers DKG on both cosigners. Then the cosigners run the DKLs23 DKG rounds directly P2P and each persists its own share.    
+A one-time ceremony. The Orchestrator triggers DKG on all n cosigners (all must be online). Then the cosigners run the DKLs23 DKG rounds directly P2P and each persists its own share.    
 
 The derived address is reported back and independently verified by the operator.    
 
@@ -27,7 +27,7 @@ The derived address is reported back and independently verified by the operator.
 
 ### 1.3 Signing and broadcast workflow
 
-The runtime path. The client calls the Orchestrator to prepare and sign. Then the Orchestrator triggers signing on both cosigners.    
+The runtime path. The client calls the Orchestrator to prepare and sign. Then the Orchestrator selects t ready cosigners (preference order, cold party last) and triggers signing on exactly those.    
 
 The cosigners run the DKLs23 rounds directly P2P and return the final signature.    
 
@@ -47,7 +47,7 @@ Build an unsigned EIP-1559 transaction from intent.
 
 ### `POST /v1/sign`
 
-Execute signing across both cosigners over the supplied unsigned transaction.
+Execute signing across the selected t cosigners over the supplied unsigned transaction.
 
 ### `POST /v1/broadcast`
 
@@ -61,7 +61,7 @@ Submit the signed transaction to Sepolia and wait up to 30 seconds for a receipt
 sovra-mpc-poc/
 ├── crates/
 │   ├── sovra-api/           # Orchestrator (API Host) binary
-│   ├── sovra-cosigner/      # Cosigner binary (used for both A and B)
+│   ├── sovra-cosigner/      # Cosigner binary (one process per party)
 │   ├── sovra-cli/           # Operator CLI (talks to Orchestrator only)
 │   ├── sovra-types/         # Shared identifiers, session states, errors
 │   ├── sovra-ipc/           # HTTP/JSON control + WS relay, mTLS transport

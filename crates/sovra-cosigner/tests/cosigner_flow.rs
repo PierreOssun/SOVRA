@@ -57,15 +57,17 @@ fn permissive_policy() -> sovra_policy::Policy {
     }
 }
 
-/// Two cosigners, keys exchanged, pointed at one hub. Returns (router0, router1).
+/// Two cosigners sharing one roster, pointed at one hub. Returns (router0, router1).
 fn two_cosigners(dir: &std::path::Path, relay_url: &str, tls: &TlsMaterials) -> (Router, Router) {
     let sk0 = SigningKey::generate(&mut rand::rngs::OsRng);
     let sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
-    let mk = |party_id: u8, sk: &SigningKey, peer: &SigningKey| {
+    let roster = vec![sk0.verifying_key(), sk1.verifying_key()];
+    let mk = |party_id: u8, sk: &SigningKey| {
         Arc::new(CosignerState {
             party_id,
             signing_key: sk.clone(),
-            peer_vk: Some(peer.verifying_key()),
+            roster: Some(roster.clone()),
+            threshold: 2,
             store: SignerStore::open(dir.join(format!("party{party_id}"))).unwrap(),
             relay_url: relay_url.to_owned(),
             relay_tls: tls.ws_client_config().unwrap(),
@@ -74,10 +76,7 @@ fn two_cosigners(dir: &std::path::Path, relay_url: &str, tls: &TlsMaterials) -> 
             policy: permissive_policy(),
         })
     };
-    (
-        build_router(mk(0, &sk0, &sk1)),
-        build_router(mk(1, &sk1, &sk0)),
-    )
+    (build_router(mk(0, &sk0)), build_router(mk(1, &sk1)))
 }
 
 fn post_json(path: &str, body: &impl Serialize) -> Request<Body> {
@@ -120,6 +119,8 @@ async fn joint_dkg_then_sign() {
     // dkg: one instance, both parties, concurrently — RemoteBackend's job, played here by the test
     let dkg = StartDkgRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
+        n_parties: 2,
+        threshold: 2,
     };
     let (a, b) = tokio::join!(
         r0.clone().oneshot(post_json("/dkg", &dkg)),
@@ -136,6 +137,7 @@ async fn joint_dkg_then_sign() {
     let sign = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
         unsigned_transaction: unsigned_tx_bytes(),
+        participants: vec![0, 1],
     };
     let (a, b) = tokio::join!(
         r0.clone().oneshot(post_json("/sign", &sign)),
@@ -148,6 +150,8 @@ async fn joint_dkg_then_sign() {
     // second dkg on either party -> 409
     let dkg2 = StartDkgRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
+        n_parties: 2,
+        threshold: 2,
     };
     assert_eq!(
         r0.oneshot(post_json("/dkg", &dkg2)).await.unwrap().status(),
@@ -166,6 +170,7 @@ async fn sign_rejects_undecodable_bytes_before_any_mpc() {
     let garbage = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
         unsigned_transaction: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+        participants: vec![0, 1],
     };
     let resp = r0
         .clone()
@@ -181,16 +186,21 @@ async fn sign_rejects_undecodable_bytes_before_any_mpc() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sign_denied_by_policy_before_any_mpc() {
-    // Zero ceiling: the 1-wei test tx always violates. peer_vk is None and
-    // the store is empty on purpose — a 403 (not 409) proves the veto fires
-    // before shard load and peer checks; the dead relay URL proves no dial.
+    // Zero ceiling: the 1-wei test tx always violates. The store is empty on
+    // purpose — a 403 (not 409) proves the veto fires before shard load; the
+    // dead relay URL proves no dial. (Since M9 the subset/roster validation
+    // deliberately precedes policy — an orchestrator bug is not a signing
+    // decision to log a verdict for — so a roster must be present.)
     let dir = tempfile::tempdir().unwrap();
     let tls = materials(dir.path());
     let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let peer = SigningKey::generate(&mut rand::rngs::OsRng);
+    let roster = vec![sk.verifying_key(), peer.verifying_key()];
     let state = Arc::new(CosignerState {
         party_id: 0,
         signing_key: sk,
-        peer_vk: None,
+        roster: Some(roster),
+        threshold: 2,
         store: SignerStore::open(dir.path().join("party0")).unwrap(),
         relay_url: "wss://127.0.0.1:9/ws".into(),
         relay_tls: tls.ws_client_config().unwrap(),
@@ -206,6 +216,7 @@ async fn sign_denied_by_policy_before_any_mpc() {
     let req = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
         unsigned_transaction: unsigned_tx_bytes(),
+        participants: vec![0, 1],
     };
     let resp = router
         .clone()

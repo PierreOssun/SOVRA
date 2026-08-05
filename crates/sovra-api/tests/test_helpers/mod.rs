@@ -20,7 +20,8 @@ pub struct TestTls {
     /// Keeps the tempdir (and every pem in it) alive for the test's duration.
     pub dir: tempfile::TempDir,
     pub orchestrator: Arc<TlsMaterials>,
-    pub cosigners: [Arc<TlsMaterials>; 2],
+    /// Index = party id.
+    pub cosigners: Vec<Arc<TlsMaterials>>,
 }
 
 impl TestTls {
@@ -30,7 +31,7 @@ impl TestTls {
     }
 }
 
-pub fn test_tls() -> TestTls {
+pub fn test_tls(n: usize) -> TestTls {
     let dir = tempfile::tempdir().unwrap();
     let ca = sovra_certs::ensure_ca(dir.path()).unwrap();
     let mk = |stem: &str, cn: &str| {
@@ -47,10 +48,9 @@ pub fn test_tls() -> TestTls {
         )
     };
     let orchestrator = mk("orchestrator", "sovra-orchestrator");
-    let cosigners = [
-        mk("cosigner0", "sovra-cosigner-0"),
-        mk("cosigner1", "sovra-cosigner-1"),
-    ];
+    let cosigners = (0..n)
+        .map(|id| mk(&format!("cosigner{id}"), &format!("sovra-cosigner-{id}")))
+        .collect();
     TestTls {
         dir,
         orchestrator,

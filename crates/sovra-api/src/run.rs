@@ -30,7 +30,14 @@ use crate::{
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
     let provider = http_provider(&config.rpc_url)?.erased();
-    let cosigners: [Url; 2] = [config.cosigner0_url.parse()?, config.cosigner1_url.parse()?];
+    // Preference order straight from the config file — the cold recovery
+    // party sits last and is only selected when a preferred party is down.
+    let cosigners: Vec<(u8, Url)> = config
+        .cosigners
+        .iter()
+        .map(|entry| Ok::<_, url::ParseError>((entry.party_id, entry.url.parse()?)))
+        .collect::<Result<_, _>>()?;
+    let threshold = config.threshold as usize;
 
     // Hub up FIRST — cosigners dial it mid-run; it must exist before any dkg/sign.
     let relay_listener = std::net::TcpListener::bind(&config.relay_bind)?;
@@ -44,18 +51,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config.tls_key_path,
     )?;
 
+    // Built before recovery on purpose: `new` validates the cosigner set
+    // (unique ids, threshold bounds, https), so a bad config fails startup
+    // immediately instead of after the recovery retry loop.
+    let backend = RemoteBackend::new(cosigners.clone(), threshold, &tls)?;
+
     // Bounded retry: cosigners start first (RUN.md), but give them ~10s of grace.
     let probe = tls.http_client(Duration::from_secs(5))?;
-    let active = recover_with_retry(&probe, &cosigners).await?;
+    let active = recover_with_retry(&probe, &cosigners, threshold).await?;
     if let Some(address) = active {
         tracing::info!(%address, "recovered active dkg generation");
     }
 
-    let state = AppState::new(
-        provider,
-        RemoteBackend::new(cosigners[0].clone(), cosigners[1].clone(), &tls)?,
-        active,
-    );
+    let state = AppState::new(provider, backend, active);
     let api_listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("listening on {}", config.bind_addr);
 
@@ -101,16 +109,17 @@ async fn correlation(req: axum::extract::Request, next: axum::middleware::Next) 
 
 async fn recover_with_retry(
     http: &reqwest::Client,
-    cosigners: &[Url; 2],
+    cosigners: &[(u8, Url)],
+    threshold: usize,
 ) -> Result<Option<Address>, RecoverError> {
     for _ in 0..9 {
-        match orchestrator::recover_active(http, cosigners).await {
-            Err(RecoverError::Transport(e)) => {
+        match orchestrator::recover_active(http, cosigners, threshold).await {
+            Err(e @ RecoverError::Transport { .. }) => {
                 tracing::warn!(error = %e, "cosigners not ready, retrying");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             other => return other,
         }
     }
-    orchestrator::recover_active(http, cosigners).await
+    orchestrator::recover_active(http, cosigners, threshold).await
 }

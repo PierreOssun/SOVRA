@@ -1,9 +1,17 @@
 //! Orchestrator side of the control plane. [`RemoteBackend`] implements the
-//! `MpcBackend` trait by POSTing each operation to **both** cosigners in
-//! parallel with one shared random instance id, then cross-checking the two
-//! responses — both parties must succeed *and agree* (`PartyMismatch`
+//! `MpcBackend` trait by POSTing each operation to a set of cosigners in
+//! parallel with one shared random instance id, then cross-checking the
+//! responses — every asked party must succeed *and agree* (`PartyMismatch`
 //! otherwise), so a buggy or compromised cosigner can't return a divergent
 //! result undetected. [`fetch_signer`] is the startup-recovery probe.
+//!
+//! t-of-n (M9): DKG goes to all n parties (after a `/roster` consistency
+//! pre-flight); signing goes to a subset of t, selected once by liveness in
+//! config preference order — the cold recovery party sits last, so it is only
+//! drawn in when a preferred cosigner is down. Selection happens BEFORE any
+//! `/sign` POST and is never revisited: failover keyed on outcome would let
+//! this process route around a policy veto, failover keyed on liveness
+//! cannot (a vetoing party is alive, gets selected, and its veto is final).
 //!
 //! Why reqwest/JSON: plain HTTP keeps the cosigner API curl-debuggable and
 //! reuses the workspace HTTP stack; no streaming is needed on this plane.
@@ -24,10 +32,10 @@ use url::Url;
 
 use crate::{
     control::{
-        CORRELATION_HEADER, CORRELATION_ID, SignParts, SignerInfo, StartDkgRequest,
+        CORRELATION_HEADER, CORRELATION_ID, RosterInfo, SignParts, SignerInfo, StartDkgRequest,
         StartSignRequest,
     },
-    tls::{TlsError, TlsMaterials},
+    tls::TlsMaterials,
     types::IpcError,
 };
 
@@ -35,27 +43,46 @@ use crate::{
 /// mid-flight; this only catches a cosigner that stops responding entirely.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Per-request bound on the pre-sign readiness probes: a down party should
+/// cost seconds, not the 90s operation timeout.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub struct RemoteBackend {
-    cosigners: [Url; 2],
+    /// Preference order, NOT id order: the first `threshold` ready parties
+    /// sign. `(global party id, control-plane base url)`.
+    cosigners: Vec<(u8, Url)>,
+    threshold: usize,
     http: reqwest::Client,
 }
 
 impl MpcBackend for RemoteBackend {
     async fn dkg(&self) -> Result<Address, MpcError> {
+        // Pre-flight: a mismatched roster otherwise fails as an opaque MPC
+        // timeout (wrong vks change MsgId routing) — catch it as config.
+        self.preflight_roster().await?;
         let req = StartDkgRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
+            n_parties: self.cosigners.len() as u8,
+            threshold: self.threshold as u8,
         };
-        self.broadcast::<_, SignerInfo>("dkg", &req)
+        self.broadcast::<_, SignerInfo>(&self.cosigners, "dkg", &req)
             .await
             .map(|i| i.address)
     }
 
     async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
+        let signers = self.select_signers().await?;
+        // Selection is by preference; the wire order is canonical (ascending)
+        // so every party derives the identical subset vector.
+        let mut participants: Vec<u8> = signers.iter().map(|(id, _)| *id).collect();
+        participants.sort_unstable();
+        tracing::info!(?participants, "signing subset selected");
         let req = StartSignRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
             unsigned_transaction: Bytes::copy_from_slice(unsigned_tx),
+            participants,
         };
-        self.broadcast::<_, SignParts>("sign", &req)
+        self.broadcast::<_, SignParts>(&signers, "sign", &req)
             .await
             .map(Into::into)
     }
@@ -63,47 +90,154 @@ impl MpcBackend for RemoteBackend {
 
 impl RemoteBackend {
     /// The client pins the project CA and presents the orchestrator's leaf
-    /// (mTLS on the control plane); a non-`https` cosigner URL is refused
-    /// here so misconfiguration fails at startup, not as a handshake error.
-    pub fn new(cosigner0: Url, cosigner1: Url, materials: &TlsMaterials) -> Result<Self, TlsError> {
-        for url in [&cosigner0, &cosigner1] {
+    /// (mTLS on the control plane); a non-`https` cosigner URL, a duplicate
+    /// party id, or an out-of-bounds threshold is refused here so
+    /// misconfiguration fails at startup, not as a mid-operation error.
+    pub fn new(
+        cosigners: Vec<(u8, Url)>,
+        threshold: usize,
+        materials: &TlsMaterials,
+    ) -> Result<Self, IpcError> {
+        let mut seen = std::collections::HashSet::new();
+        for (id, url) in &cosigners {
             if url.scheme() != "https" {
-                return Err(TlsError::PlainScheme {
+                return Err(crate::tls::TlsError::PlainScheme {
                     url: url.to_string(),
                     expected: "https",
-                });
+                }
+                .into());
+            }
+            if !seen.insert(id) {
+                return Err(IpcError::Config(format!("duplicate party id {id}")));
             }
         }
+        if !(2..=cosigners.len()).contains(&threshold) {
+            return Err(IpcError::Config(format!(
+                "threshold {threshold} out of bounds for {} cosigners",
+                cosigners.len()
+            )));
+        }
         Ok(Self {
-            cosigners: [cosigner0, cosigner1],
+            cosigners,
+            threshold,
             http: materials.http_client(HTTP_TIMEOUT)?,
         })
     }
 
-    /// POST the same request to both cosigners; both must succeed and agree.
-    async fn broadcast<Req, Resp>(&self, path: &str, req: &Req) -> Result<Resp, MpcError>
+    /// `GET /roster` on all n: every party must be reachable (DKG needs all
+    /// of them) and report the same (n, threshold, roster_hash), which must
+    /// also match this process's own config.
+    async fn preflight_roster(&self) -> Result<(), MpcError> {
+        let probes = self.cosigners.iter().map(|(party, url)| async move {
+            let url = url
+                .join("roster")
+                .map_err(|e| MpcError::Transport(format!("cosigner{party} url: {e}")))?;
+            let resp = self.http.get(url).send().await.map_err(|e| {
+                MpcError::Transport(format!(
+                    "cosigner{party} roster: {e} — all {} parties must be online for dkg",
+                    self.cosigners.len()
+                ))
+            })?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(MpcError::Transport(format!(
+                    "cosigner{party} roster: {status}: {text}"
+                )));
+            }
+            resp.json::<RosterInfo>().await.map_err(|e| {
+                MpcError::Transport(format!("cosigner{party} roster: bad response: {e}"))
+            })
+        });
+        let results = futures_util::future::join_all(probes).await;
+
+        let mut infos = Vec::with_capacity(results.len());
+        for ((party, _), result) in self.cosigners.iter().zip(results) {
+            let info = result?;
+            if info.n as usize != self.cosigners.len() || info.threshold as usize != self.threshold
+            {
+                return Err(MpcError::PartyMismatch(format!(
+                    "cosigner{party} is configured {}-of-{}, orchestrator expects {}-of-{}",
+                    info.threshold,
+                    info.n,
+                    self.threshold,
+                    self.cosigners.len()
+                )));
+            }
+            infos.push((*party, info));
+        }
+        let (first_party, first_info) = infos[0];
+        for (party, info) in &infos[1..] {
+            if *info != first_info {
+                return Err(MpcError::PartyMismatch(format!(
+                    "roster mismatch: cosigner{first_party} reports {first_info:?}, \
+                     cosigner{party} reports {info:?} — the participant lists diverge"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Probe `GET /signer` on all n concurrently and take the first
+    /// `threshold` ready parties in config preference order. Readiness (alive
+    /// AND provisioned) is the ONLY selection input — outcomes never are.
+    async fn select_signers(&self) -> Result<Vec<(u8, Url)>, MpcError> {
+        let probes = self.cosigners.iter().map(|(party, url)| async move {
+            let ready = match url.join("signer") {
+                Ok(u) => self
+                    .http
+                    .get(u)
+                    .timeout(READY_PROBE_TIMEOUT)
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
+            (*party, url.clone(), ready)
+        });
+        let results = futures_util::future::join_all(probes).await;
+        let ready: Vec<(u8, Url)> = results
+            .into_iter()
+            .filter(|(_, _, ready)| *ready)
+            .map(|(party, url, _)| (party, url))
+            .collect();
+        if ready.len() < self.threshold {
+            return Err(MpcError::Transport(format!(
+                "only {} of {} cosigners ready; need {}",
+                ready.len(),
+                self.cosigners.len(),
+                self.threshold
+            )));
+        }
+        Ok(ready.into_iter().take(self.threshold).collect())
+    }
+
+    /// POST the same request to every target; all must succeed and agree.
+    async fn broadcast<Req, Resp>(
+        &self,
+        targets: &[(u8, Url)],
+        path: &str,
+        req: &Req,
+    ) -> Result<Resp, MpcError>
     where
         Req: Serialize,
         Resp: DeserializeOwned + PartialEq + std::fmt::Debug,
     {
-        let (r0, r1) = tokio::join!(
-            self.post::<_, Resp>(0, path, req),
-            self.post::<_, Resp>(1, path, req)
-        );
-        let (a, b) = combine(r0, r1)?;
-        if a != b {
-            return Err(MpcError::PartyMismatch(format!("{path}: {a:?} != {b:?}")));
-        }
-        Ok(a)
+        let posts = targets.iter().map(|(party, url)| async move {
+            (*party, self.post::<_, Resp>(*party, url, path, req).await)
+        });
+        combine(futures_util::future::join_all(posts).await)
     }
 
     async fn post<Req: Serialize, Resp: DeserializeOwned>(
         &self,
-        party: usize,
+        party: u8,
+        base: &Url,
         path: &str,
         body: &Req,
     ) -> Result<Resp, MpcError> {
-        let url = self.cosigners[party]
+        let url = base
             .join(path)
             .map_err(|e| MpcError::Transport(format!("cosigner{party} url: {e}")))?;
         let correlation_id = CORRELATION_ID
@@ -129,10 +263,7 @@ impl RemoteBackend {
                 .and_then(|v| v["reason"].as_str().map(str::to_owned))
                 .unwrap_or(text);
             return Err(MpcError::Rejected {
-                vetoes: vec![Veto {
-                    party: party as u8,
-                    reason,
-                }],
+                vetoes: vec![Veto { party, reason }],
             });
         }
         if !status.is_success() {
@@ -147,30 +278,52 @@ impl RemoteBackend {
     }
 }
 
-/// Merge the two per-party outcomes of one broadcast into a single result.
+/// Merge the per-party outcomes of one broadcast into a single result.
 ///
-/// In 2-of-2 either cosigner alone blocks a signature, and when policies
-/// differ the vetoing party answers 403 quickly while the allowing party
-/// waits alone in the hub until its ttl expires into a timeout/502 — so
-/// which error this function surfaces decides whether a policy veto is
-/// visible or buried in transport noise.
-fn combine<Resp>(
-    r0: Result<Resp, MpcError>,
-    r1: Result<Resp, MpcError>,
-) -> Result<(Resp, Resp), MpcError> {
-    match (r0, r1) {
-        (Ok(a), Ok(b)) => Ok((a, b)),
-        // Both vetoed: one Rejected carrying every veto, party 0 first.
-        // This arm must precede the single-Rejected arms to ever match.
-        (Err(MpcError::Rejected { vetoes: mut v0 }), Err(MpcError::Rejected { vetoes: v1 })) => {
-            v0.extend(v1);
-            Err(MpcError::Rejected { vetoes: v0 })
+/// Any asked party alone blocks a signature, and when policies differ the
+/// vetoing party answers 403 quickly while the allowing parties wait alone in
+/// the hub until their ttl expires into a timeout/502 — so which error this
+/// function surfaces decides whether a policy veto is visible or buried in
+/// transport noise. Precedence: every veto collected and reported together
+/// (sorted by party id) > any veto outranks any other error > first
+/// transport/protocol error > all Ok, in which case every value must be
+/// pairwise equal (`PartyMismatch` otherwise).
+fn combine<Resp>(results: Vec<(u8, Result<Resp, MpcError>)>) -> Result<Resp, MpcError>
+where
+    Resp: PartialEq + std::fmt::Debug,
+{
+    let mut vetoes = Vec::new();
+    let mut first_error = None;
+    let mut oks = Vec::new();
+    for (party, result) in results {
+        match result {
+            Ok(value) => oks.push((party, value)),
+            // A Rejected may already carry several vetoes (nested combines
+            // never happen today, but the type allows it) — extend, not push.
+            Err(MpcError::Rejected { vetoes: v }) => vetoes.extend(v),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
         }
-        // A veto outranks whatever happened to the other party — typically
-        // the allowing cosigner's ttl timeout while it waited alone.
-        (Err(e @ MpcError::Rejected { .. }), _) | (_, Err(e @ MpcError::Rejected { .. })) => Err(e),
-        (Err(e), _) | (_, Err(e)) => Err(e),
     }
+    if !vetoes.is_empty() {
+        vetoes.sort_by_key(|v| v.party);
+        return Err(MpcError::Rejected { vetoes });
+    }
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+    let mut oks = oks.into_iter();
+    let (first_party, first_value) = oks.next().expect("broadcast targets are never empty");
+    for (party, value) in oks {
+        if value != first_value {
+            return Err(MpcError::PartyMismatch(format!(
+                "cosigner{first_party} returned {first_value:?}, \
+                 cosigner{party} returned {value:?}"
+            )));
+        }
+    }
+    Ok(first_value)
 }
 
 /// Startup-recovery probe: 200 → active address, 404 → no shard, anything else → error.

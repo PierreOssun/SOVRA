@@ -2,25 +2,40 @@ How to run:
 
 ## One-command local system (tmux)
 
-Spawn the whole system — orchestrator + both cosigners, wired together — in a
-single tmux window:
+Spawn the whole system — orchestrator + all three cosigners, wired together —
+in a single tmux window:
 
 ```bash
 cargo xtask up
 ```
 
-On the **first** run this seeds each cosigner's identity under `data/cosigner{0,1}/`
+On the **first** run this seeds each cosigner's identity under `data/cosigner{0,1,2}/`
 **and the TLS material under `certs/`** (project CA + one leaf per process), pins
-each peer's verifying key, starts all three processes, and runs the one-time
-DKG so the signer address is ready. Later runs **load** the existing identities and
-certs and detect that DKG has already happened. Layout: `cosigner0` / `cosigner1`
-on top, the orchestrator full-width below. Tear it down with:
+the full participant roster (every party's verifying key, in id order) into every
+cosigner, starts all four processes, and runs the one-time 2-of-3 DKG so the
+signer address is ready. Later runs **load** the existing identities and certs
+and detect that DKG has already happened. Layout: `cosigner0` / `cosigner1` /
+`cosigner2` on top, the orchestrator full-width below. Tear it down with:
 
 ```bash
 cargo xtask down
 ```
 
 Local only. To run the processes individually, see the sections below.
+
+### The cold recovery party (cosigner 2)
+
+The scheme is **2-of-3**: cosigner 2 is the recovery shard (in production it
+lives on a cloud host). It must be online for **DKG** (which always needs all
+n parties) and for recovery ceremonies — during normal operation it should be
+**stopped**. After `cargo xtask up` finishes the DKG, hit `Ctrl-C` in the
+cosigner2 pane: signing keeps working through the preferred pair {0, 1}.
+
+Failover demo: with cosigner2 running, `Ctrl-C` cosigner1 instead — signing
+still succeeds, now via {0, 2} (the orchestrator log shows
+`signing subset selected participants=[0, 2]`). The subset is chosen by
+liveness *before* any request; a policy veto from a selected party is final
+and never triggers failover to the cold party.
 
 ### TLS material (`certs/`)
 
@@ -68,7 +83,7 @@ cargo run -p sovra-cli -- prepare \
   --value 0
 # → { "from": "0x..", "unsigned_transaction": "0x02..", "tx_digest": "0x.." }
 
-# Sign it — both cosigners run the DKLs23 rounds P2P
+# Sign it — the selected pair of cosigners runs the DKLs23 rounds P2P
 cargo run -p sovra-cli -- sign --tx 0x02...
 # → { "signed_transaction": "0x02..", "signature": { r, s, y_parity }, ... }
 ```
@@ -100,11 +115,13 @@ CLI) work.
 ### Signing policy (per cosigner)
 
 Each cosigner loads its own policy at startup (`policy_path` in
-`config/cosigner{0,1}.toml` → `config/policy{0,1}.toml`) and evaluates every
-sign request against it — after decoding the unsigned tx itself, before
+`config/cosigner{0,1,2}.toml` → `config/policy{0,1,2}.toml`) and evaluates
+every sign request against it — after decoding the unsigned tx itself, before
 joining any MPC round. A missing or unparsable policy file means the cosigner
-**refuses to start** (fail-closed). The two files may differ; in 2-of-2
-either party alone vetoes.
+**refuses to start** (fail-closed). Any *selected* party alone vetoes — but
+note that under t-of-n the effective policy is what any t parties jointly
+allow, so **all three files (including the cold party's) must carry the same
+baseline**; a permissive recovery shard would weaken the whole scheme.
 
 All keys are required: `allowed_chain_ids`, `allowed_recipients` (addresses,
 `["*"]` = any, `[]` = deny all), `max_value_wei` (**decimal string** — a TOML
@@ -230,4 +247,5 @@ SOVRA_LOG_JSON=1 RUST_LOG=info SOVRA_BIND_ADDR=0.0.0.0:3000 ./target/release/sov
 | `SOVRA_RPC_URL`   | value from `config/sepolia.toml`               | Ethereum RPC endpoint              |
 | `SOVRA_BIND_ADDR` | `127.0.0.1:3000`                               | TCP address the API listens on     |
 | `SOVRA_TLS_CA_PATH` / `_CERT_PATH` / `_KEY_PATH` | values from `config/sepolia.toml` | Orchestrator mTLS material (the deployment knob) |
-| `SOVRA_COSIGNER_TLS_CA_PATH` / `_CERT_PATH` / `_KEY_PATH` | values from `config/cosigner{0,1}.toml` | Cosigner mTLS material |
+| `SOVRA_COSIGNER_TLS_CA_PATH` / `_CERT_PATH` / `_KEY_PATH` | values from `config/cosigner{0,1,2}.toml` | Cosigner mTLS material |
+| `SOVRA_COSIGNER_PARTICIPANTS` | values from `config/cosigner{0,1,2}.toml` | Comma-separated hex roster (all parties' verifying keys, id order) — how xtask injects it |

@@ -11,10 +11,10 @@
 
 use alloy_primitives::{Address, U256};
 
-/// A 2-of-2 MPC backend: provisions key shares (DKG) and produces ECDSA
-/// signatures over transactions supplied as raw unsigned bytes.
+/// A t-of-n threshold MPC backend: provisions key shares (DKG) and produces
+/// ECDSA signatures over transactions supplied as raw unsigned bytes.
 pub trait MpcBackend {
-    /// Run a 2-of-2 distributed key generation.
+    /// Run a distributed key generation over the full participant set.
     fn dkg(&self) -> impl Future<Output = Result<Address, MpcError>> + Send;
 
     /// Produce a signature over the digest of `unsigned_tx`. Implementations

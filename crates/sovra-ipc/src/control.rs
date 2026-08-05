@@ -18,12 +18,31 @@ use sovra_mpc::EcdsaParts;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StartDkgRequest {
     pub instance: B256,
+    /// Assertions, not protocol inputs: the cosigner compares them against
+    /// its local config and 409s on divergence, but always builds the keygen
+    /// setup from its own roster — request data never shapes the ceremony.
+    pub n_parties: u8,
+    pub threshold: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSignRequest {
     pub instance: B256,
     pub unsigned_transaction: Bytes,
+    /// The signing subset: global party ids, strictly ascending (canonical
+    /// order — every selected party must derive the identical subset vector).
+    /// Each cosigner derives its own subset index from its position here.
+    pub participants: Vec<u8>,
+}
+
+/// `GET /roster` response — the DKG pre-flight consistency probe. The
+/// orchestrator only compares these for equality across parties (and against
+/// its own n/threshold config); the hash definition lives in sovra-cosigner.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RosterInfo {
+    pub n: u8,
+    pub threshold: u8,
+    pub roster_hash: B256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

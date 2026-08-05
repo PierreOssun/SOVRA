@@ -24,8 +24,12 @@ pub enum CosignerError {
     ShardExists, // 409
     #[error("no key shard; run dkg first")]
     NoShard, // 409
-    #[error("peer verifying key not configured")]
-    PeerKeyUnset, // 409
+    #[error("participant roster not configured")]
+    RosterUnset, // 409
+    #[error("scheme mismatch: {0}")]
+    RosterMismatch(String), // 409
+    #[error("invalid signing subset: {0}")]
+    InvalidSubset(String), // 409
     #[error("invalid transaction bytes: {0}")]
     Undecodable(String), // 422
     #[error("policy denied: {0}")]
@@ -48,7 +52,7 @@ impl IntoResponse for CosignerError {
     fn into_response(self) -> Response {
         use CosignerError::*;
         let (status, body) = match &self {
-            Busy | ShardExists | NoShard | PeerKeyUnset => (
+            Busy | ShardExists | NoShard | RosterUnset | RosterMismatch(_) | InvalidSubset(_) => (
                 StatusCode::CONFLICT,
                 serde_json::json!({ "error": self.to_string() }),
             ),

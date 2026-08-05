@@ -1,0 +1,18 @@
+# Signing policy for cosigner 2 (the cold recovery party) — evaluated locally
+# on every /sign, before any MPC message.
+#
+# SECURITY: this file must carry the SAME baseline as policy0/policy1. In
+# t-of-n the effective policy is what any t parties will jointly allow — a
+# permissive recovery party would let the orchestrator weaken policy simply
+# by picking the subset around the strict party.
+allowed_chain_ids = [11155111] # Sepolia only
+
+# List of 0x-addresses, or the single entry "*" for any recipient.
+# An EMPTY list denies every recipient. Default: the RUN.md demo burn address.
+allowed_recipients = ["0x000000000000000000000000000000000000dead"]
+
+# Decimal string, NOT a TOML integer (i64 would cap at ~9.2 ETH).
+max_value_wei = "1000000000000000000" # 1 ETH
+
+# false = calldata must be exactly empty (plain value transfers only).
+allow_calldata = false

@@ -9,13 +9,27 @@
 use config::{Config as RawConfig, ConfigError, Environment, File};
 use serde::Deserialize;
 
+/// One cosigner endpoint. The list's order is the signing preference order —
+/// the cold recovery party goes last so it is only selected when a preferred
+/// party is down.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CosignerEntry {
+    pub party_id: u8,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub rpc_url: String,
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
-    pub cosigner0_url: String,
-    pub cosigner1_url: String,
+    /// Known limitation: the `config` crate's env source cannot express a
+    /// table array, so this list is file-only (scalar keys keep their
+    /// `SOVRA_*` overrides).
+    pub cosigners: Vec<CosignerEntry>,
+    /// t in t-of-n; n is the length of `cosigners`.
+    #[serde(default = "default_threshold")]
+    pub threshold: u8,
     #[serde(default = "default_relay_bind")]
     pub relay_bind: String,
     /// No defaults on purpose (mirrors the cosigner's rule): the control
@@ -33,7 +47,15 @@ fn default_relay_bind() -> String {
     "127.0.0.1:3100".into()
 }
 
+fn default_threshold() -> u8 {
+    2
+}
+
 impl Config {
+    /// Deserialization only — the cosigner-set invariants (unique party ids,
+    /// threshold bounds) are enforced in `RemoteBackend::new`, the seam that
+    /// owns them; `run()` constructs it before anything slow, so a bad set
+    /// still fails startup immediately.
     pub fn load() -> Result<Self, ConfigError> {
         RawConfig::builder()
             .add_source(File::with_name("config/sepolia").required(true))

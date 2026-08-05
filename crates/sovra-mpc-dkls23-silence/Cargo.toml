@@ -17,8 +17,8 @@ derivation-path = { workspace = true }
 sl-dkls23 = { workspace = true, features = ["test-support"] }
 sl-mpc-mate = { workspace = true, features = ["simple-relay"] }
 ed25519-dalek = { workspace = true }
+futures-util = { workspace = true }
 tracing = { workspace = true }
-tempfile = "3.27.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }

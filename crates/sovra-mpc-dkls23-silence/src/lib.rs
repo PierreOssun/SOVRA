@@ -3,8 +3,14 @@
 //! Two layers:
 //! * `keygen_party` / `sign_party` — single-party runners, driven once per process over
 //!   any `Relay` (a `WsRelay` in `sovra-cosigner`, `SimpleMessageRelay` in tests).
-//! * `InProcessBackend` — runs *both* parties in one process; test-only, holds both shards,
+//! * `InProcessBackend` — runs *all* parties in one process; test-only, holds every shard,
 //!   pins the HTTP contract in `sovra-api/tests/api_flow.rs`.
+//!
+//! t-of-n semantics (M9): keygen always involves all n parties of the roster;
+//! signing runs over an explicit *subset* of t global party ids. The library's
+//! sign setup is indexed by position **within the subset** (`party_idx`),
+//! which only coincides with the global `party_id` when the subset is a
+//! prefix — the mapping is derived here, never sent over the wire.
 
 #[cfg(test)]
 mod tests;
@@ -38,41 +44,32 @@ use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
 
 use crate::types::PartyContext;
 
-/// Number of cosigners in the scheme — the `n` in a `t`-of-`n` setup.
-const PARTIES: usize = 2;
-
-/// Minimum parties required to sign — the `t` in `t`-of-`n`.
-/// At `t = n = 2` there is no redundancy: *both* cosigners must participate
-/// in every DKG and every signature.
-const THRESHOLD: usize = 2;
-
 /// Time-to-live for a protocol run's setup messages: how long the relay
 /// retains them and how long a party will wait before the round is considered
 /// expired.
-/// Note: Generous here because both parties run in-process and finish fast;
+/// Note: Generous here because all parties run in-process and finish fast;
 const DEFAULT_TTL: Duration = Duration::from_secs(60);
 
 pub struct InProcessBackend {
-    stores: [SignerStore; 2],
-    signing_keys: [SigningKey; 2],
-    party_vks: [VerifyingKey; 2],
+    stores: Vec<SignerStore>,
+    signing_keys: Vec<SigningKey>,
+    party_vks: Vec<VerifyingKey>,
+    threshold: u8,
     ttl: Duration,
 }
 
 impl InProcessBackend {
-    pub fn new(stores: [SignerStore; 2]) -> Self {
-        let signing_keys = [
-            SigningKey::generate(&mut rand::rngs::OsRng),
-            SigningKey::generate(&mut rand::rngs::OsRng),
-        ];
-        let party_vks = [
-            signing_keys[0].verifying_key(),
-            signing_keys[1].verifying_key(),
-        ];
+    pub fn new(stores: Vec<SignerStore>, threshold: u8) -> Self {
+        let signing_keys: Vec<SigningKey> = stores
+            .iter()
+            .map(|_| SigningKey::generate(&mut rand::rngs::OsRng))
+            .collect();
+        let party_vks = signing_keys.iter().map(|k| k.verifying_key()).collect();
         Self {
             stores,
             signing_keys,
             party_vks,
+            threshold,
             ttl: DEFAULT_TTL,
         }
     }
@@ -82,7 +79,8 @@ impl InProcessBackend {
             party_id,
             instance,
             signing_key: self.signing_keys[party_id as usize].clone(),
-            party_vks: self.party_vks, // VerifyingKey is Copy; if not, use `.clone()` on the array
+            party_vks: self.party_vks.clone(),
+            threshold: self.threshold,
             ttl: self.ttl,
         }
     }
@@ -92,32 +90,34 @@ impl MpcBackend for InProcessBackend {
         let instance = B256::from(rand::random::<[u8; 32]>());
         let coord = SimpleMessageRelay::new();
 
-        let ctx0 = self.ctx(0, instance);
-        let ctx1 = self.ctx(1, instance);
-        let (r0, r1) = tokio::join!(
-            keygen_party(&ctx0, coord.connect()),
-            keygen_party(&ctx1, coord.connect()),
-        );
-        let (share0, addr0) = r0?;
-        let (share1, addr1) = r1?;
-
-        if addr0 != addr1 {
+        let ctxs: Vec<PartyContext> = (0..self.stores.len() as u8)
+            .map(|p| self.ctx(p, instance))
+            .collect();
+        let results = futures_util::future::join_all(
+            ctxs.iter().map(|ctx| keygen_party(ctx, coord.connect())),
+        )
+        .await;
+        let mut pairs = Vec::with_capacity(results.len());
+        for r in results {
+            pairs.push(r?);
+        }
+        let address = pairs[0].1;
+        if let Some((_, other)) = pairs.iter().find(|(_, addr)| *addr != address) {
             return Err(MpcError::PartyMismatch(format!(
-                "dkg addresses differ: {addr0} != {addr1}"
+                "dkg addresses differ: {address} != {other}"
             )));
         }
 
         let meta = SignerMetadata {
             signer_id: SignerId::new(ACTIVE_SIGNER_ID),
-            address: addr0,
+            address,
         };
-        self.stores[0]
-            .save_shard(&meta, &share0)
-            .map_err(|e| MpcError::Dkg(e.to_string()))?;
-        self.stores[1]
-            .save_shard(&meta, &share1)
-            .map_err(|e| MpcError::Dkg(e.to_string()))?;
-        Ok(addr0)
+        for (store, (share, _)) in self.stores.iter().zip(&pairs) {
+            store
+                .save_shard(&meta, share)
+                .map_err(|e| MpcError::Dkg(e.to_string()))?;
+        }
+        Ok(address)
     }
 
     async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
@@ -129,31 +129,39 @@ impl MpcBackend for InProcessBackend {
             .map_err(|e| MpcError::Sign(format!("invalid transaction: {e}")))?;
         let signing_hash = prepared.signing_hash;
         let id = SignerId::new(ACTIVE_SIGNER_ID);
-        let share0 = self.stores[0]
-            .load_shard(&id)
-            .map_err(|e| MpcError::Sign(e.to_string()))?;
-        let share1 = self.stores[1]
-            .load_shard(&id)
-            .map_err(|e| MpcError::Sign(e.to_string()))?;
+
+        // The first t parties stand in for subset selection (RemoteBackend's
+        // job in production) — every shard is local here anyway.
+        let subset: Vec<u8> = (0..self.threshold).collect();
+        let mut shares = Vec::with_capacity(subset.len());
+        for &p in &subset {
+            shares.push(
+                self.stores[p as usize]
+                    .load_shard(&id)
+                    .map_err(|e| MpcError::Sign(e.to_string()))?,
+            );
+        }
 
         let instance = B256::from(rand::random::<[u8; 32]>());
         let coord = SimpleMessageRelay::new();
 
-        let ctx0 = self.ctx(0, instance);
-        let ctx1 = self.ctx(1, instance);
-        let (r0, r1) = tokio::join!(
-            sign_party(&ctx0, &share0, signing_hash, coord.connect()),
-            sign_party(&ctx1, &share1, signing_hash, coord.connect()),
-        );
-        let parts0 = r0?;
-        let parts1 = r1?;
-
-        if parts0 != parts1 {
+        let ctxs: Vec<PartyContext> = subset.iter().map(|&p| self.ctx(p, instance)).collect();
+        let results =
+            futures_util::future::join_all(ctxs.iter().zip(&shares).map(|(ctx, share)| {
+                sign_party(ctx, share, signing_hash, &subset, coord.connect())
+            }))
+            .await;
+        let mut all = Vec::with_capacity(results.len());
+        for r in results {
+            all.push(r?);
+        }
+        let parts = all[0];
+        if all.iter().any(|p| *p != parts) {
             return Err(MpcError::PartyMismatch(
                 "sign parts differ between parties".into(),
             ));
         }
-        Ok(parts0)
+        Ok(parts)
     }
 }
 
@@ -166,25 +174,31 @@ pub fn address_from_keyshare(keyshare: &Keyshare) -> Result<Address, MpcError> {
     Ok(Address::from_public_key(&vk))
 }
 
-/// This party's half of a 2-of-2 DKG. Returns its own shard (opaque bytes for the store)
-/// and the address it independently derived from that shard.
+/// This party's share of a t-of-n DKG over the full roster. Returns its own
+/// shard (opaque bytes for the store) and the address it independently
+/// derived from that shard.
 pub async fn keygen_party(
     ctx: &PartyContext,
     relay: impl Relay,
 ) -> Result<(KeyShare, Address), MpcError> {
-    let ranks = [0u8; PARTIES];
+    let n = ctx.party_vks.len();
+    if !(2..=n).contains(&(ctx.threshold as usize)) || ctx.party_id as usize >= n {
+        return Err(MpcError::Dkg(format!(
+            "invalid scheme: {}-of-{n} with party_id {}",
+            ctx.threshold, ctx.party_id
+        )));
+    }
+    let ranks = vec![0u8; n];
 
     let setup = KeygenSetup::new(
         InstanceId::new(ctx.instance.0), // B256 -> [u8; 32]
-        ctx.signing_key.clone(),         // real ed25519 identity (was NoSigningKey)
-        ctx.party_id as usize,
-        ctx.party_vks.to_vec(), // real peer keys (was NoVerifyingKey)
+        ctx.signing_key.clone(),
+        ctx.party_id as usize, // keygen is indexed by GLOBAL id — unlike sign
+        ctx.party_vks.clone(),
         &ranks,
-        THRESHOLD,
+        ctx.threshold as usize,
     )
     .with_ttl(ctx.ttl);
-    // If MS inference ever complains, annotate:
-    // let setup: KeygenSetup<_, _, ed25519::Signature> = KeygenSetup::new(...)...;
 
     let stats = Stats::alloc();
     let keyshare = keygen::run(setup, rand::random(), RelayStats::new(relay, stats.clone()))
@@ -197,25 +211,67 @@ pub async fn keygen_party(
     Ok((share, address))
 }
 
-/// This party's half of a signing round over `digest`.
+/// This party's share of a signing round over `digest`, run by the `subset`
+/// of global party ids (strictly ascending, length t). All validation happens
+/// before the relay is touched, so a bad subset never opens an MPC session.
 pub async fn sign_party(
     ctx: &PartyContext,
     share: &KeyShare, // opaque bytes from the store
     digest: B256,
+    subset: &[u8],
     relay: impl Relay,
 ) -> Result<EcdsaParts, MpcError> {
+    let n = ctx.party_vks.len();
+    // Strictly ascending = canonical order AND duplicate rejection in one
+    // check: every selected party must build the identical subset vector,
+    // because the library verifies setup messages positionally.
+    if !subset.windows(2).all(|w| w[0] < w[1]) || subset.iter().any(|&p| p as usize >= n) {
+        return Err(MpcError::Sign(format!(
+            "invalid signing subset {subset:?}: must be strictly ascending party ids < {n}"
+        )));
+    }
+    // The library's sign setup is indexed by position IN THE SUBSET, not by
+    // global party id — they only coincide when the subset is a prefix.
+    let party_idx = subset
+        .iter()
+        .position(|&p| p == ctx.party_id)
+        .ok_or_else(|| {
+            MpcError::Sign(format!(
+                "party {} is not in signing subset {subset:?}",
+                ctx.party_id
+            ))
+        })?;
+
     let keyshare: Arc<Keyshare> = Keyshare::from_bytes(share.as_bytes()) // opaque -> library
         .map(Arc::new)
         .ok_or(MpcError::Deserialize)?; // from_bytes is Option
 
+    // A shard from an older generation (different roster or threshold) would
+    // otherwise stall the protocol with an opaque timeout — name the mismatch.
+    if keyshare.party_id != ctx.party_id
+        || keyshare.total_parties as usize != n
+        || keyshare.threshold as usize != subset.len()
+    {
+        return Err(MpcError::Sign(format!(
+            "keyshare/scheme mismatch: shard is party {} of a {}-of-{} scheme, \
+             run is party {} with a {}-signer subset over n={n}",
+            keyshare.party_id,
+            keyshare.threshold,
+            keyshare.total_parties,
+            ctx.party_id,
+            subset.len(),
+        )));
+    }
+
     let chain_path = DerivationPath::from_str("m")
         .map_err(|e| MpcError::Sign(format!("bad chain path: {e}")))?;
 
+    let subset_vks: Vec<VerifyingKey> = subset.iter().map(|&p| ctx.party_vks[p as usize]).collect();
     let setup = SignSetup::new(
         InstanceId::new(ctx.instance.0),
         ctx.signing_key.clone(),
-        ctx.party_id as usize,
-        ctx.party_vks.to_vec(),
+        party_idx,
+        subset_vks,
         keyshare.clone(), // Arc<Keyshare> — SignSetup::new wants Arc<KS>
     )
     .with_chain_path(chain_path)
@@ -245,24 +301,28 @@ fn log_bandwidth(party_id: u8, stats: &Arc<Mutex<Stats>>, phase: &str) {
 }
 
 impl InProcessBackend {
-    /// Startup recovery for the test backend: both stores empty → None; both
+    /// Startup recovery for the test backend: all stores empty → None; all
     /// holding the same address → Some; anything else is partial DKG state.
+    /// Stricter than the orchestrator's n-way probe on purpose — every store
+    /// is local here, so there is no "cold party" to tolerate.
     pub fn recover_active(&self) -> Result<Option<Address>, MpcError> {
         let id = SignerId::new(ACTIVE_SIGNER_ID);
-        let party0 = self.stores[0]
-            .load_active(&id)
-            .map_err(|e| MpcError::Dkg(e.to_string()))?;
-        let party1 = self.stores[1]
-            .load_active(&id)
-            .map_err(|e| MpcError::Dkg(e.to_string()))?;
-
-        match (party0, party1) {
-            (None, None) => Ok(None),
-            (Some(a), Some(b)) if a == b => Ok(Some(a)),
-            (party0, party1) => Err(MpcError::Dkg(format!(
-                "shard stores disagree (party0: {party0:?}, party1: {party1:?}); \
-                 partial dkg state — wipe both store dirs and re-run dkg"
-            ))),
+        let mut reports = Vec::with_capacity(self.stores.len());
+        for (party, store) in self.stores.iter().enumerate() {
+            reports.push((
+                party,
+                store
+                    .load_active(&id)
+                    .map_err(|e| MpcError::Dkg(e.to_string()))?,
+            ));
         }
+        let first = reports[0].1;
+        if reports.iter().any(|(_, a)| *a != first) {
+            return Err(MpcError::Dkg(format!(
+                "shard stores disagree ({reports:?}); \
+                 partial dkg state — wipe the store dirs and re-run dkg"
+            )));
+        }
+        Ok(first)
     }
 }

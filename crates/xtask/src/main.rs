@@ -27,7 +27,13 @@ use sovra_cosigner::{config::Config as CosignerConfig, identity};
 /// is a PREFIX match in tmux, so `-t sovra` would also match e.g. `sovra-notes`.
 const SESSION: &str = "sovra";
 /// Cosigner config files, relative to the workspace root; index = party id.
-const CONFIGS: [&str; 2] = ["config/cosigner0.toml", "config/cosigner1.toml"];
+/// cosigner2 is the cold recovery party — `up` starts it because DKG needs
+/// all n; stop it afterwards (Ctrl-C in its pane) to simulate cold storage.
+const CONFIGS: [&str; 3] = [
+    "config/cosigner0.toml",
+    "config/cosigner1.toml",
+    "config/cosigner2.toml",
+];
 /// Readiness bound per waited-on process. Generous on purpose: a first run
 /// compiles three heavy binaries serialized on cargo's build lock, which can
 /// take several minutes on a cold target dir.
@@ -97,9 +103,10 @@ fn up() -> Result<(), Box<dyn Error>> {
     let party_ids: Vec<u8> = parties.iter().map(|(cfg, _)| cfg.party_id).collect();
     let orch_leaf = seed_certs(&root, &party_ids, &[])?;
 
-    // 2. Lay out the panes: cosigner0 | cosigner1 on top, orchestrator full-width
-    //    below. `-c root` anchors every pane's cwd at the workspace root so the
-    //    relative config/data paths resolve no matter where xtask was invoked.
+    // 2. Lay out the panes: cosigner0 | cosigner1 | cosigner2 on top,
+    //    orchestrator full-width below. `-c root` anchors every pane's cwd at
+    //    the workspace root so the relative config/data paths resolve no
+    //    matter where xtask was invoked.
     let top_left = new_pane(&[
         "new-session",
         "-d",
@@ -111,16 +118,23 @@ fn up() -> Result<(), Box<dyn Error>> {
         root_str,
     ])?;
     let bottom = new_pane(&["split-window", "-v", "-t", &top_left, "-c", root_str])?;
-    let top_right = new_pane(&["split-window", "-h", "-t", &top_left, "-c", root_str])?;
+    let top_mid = new_pane(&["split-window", "-h", "-t", &top_left, "-c", root_str])?;
+    let top_right = new_pane(&["split-window", "-h", "-t", &top_mid, "-c", root_str])?;
 
-    // 3. Launch the cosigners. `env KEY=VAL cmd` instead of shell `KEY=VAL cmd`:
-    //    send-keys types into the user's login shell, and non-POSIX shells (fish)
-    //    reject prefix assignments — the `env` program works everywhere.
-    let cosigner_panes = [&top_left, &top_right];
+    // 3. Launch the cosigners. Every party gets the SAME full roster (all
+    //    verifying keys in party-id order) — under t-of-n there is no "the
+    //    peer" anymore. `env KEY=VAL cmd` instead of shell `KEY=VAL cmd`:
+    //    send-keys types into the user's login shell, and non-POSIX shells
+    //    (fish) reject prefix assignments — the `env` program works everywhere.
+    let roster = parties
+        .iter()
+        .map(|(_, vk)| vk.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let cosigner_panes = [&top_left, &top_mid, &top_right];
     for (i, pane) in cosigner_panes.into_iter().enumerate() {
-        let (_, peer_vk) = &parties[1 - i]; // party i pins its PEER's key
         let cmd = format!(
-            "env SOVRA_COSIGNER_PEER_VERIFYING_KEY={peer_vk} cargo run -p sovra-cosigner -- {}",
+            "env SOVRA_COSIGNER_PARTICIPANTS={roster} cargo run -p sovra-cosigner -- {}",
             CONFIGS[i],
         );
         send(pane, &cmd)?;

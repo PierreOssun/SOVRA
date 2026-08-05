@@ -1,11 +1,14 @@
-//! Cosigner configuration: file path passed as `argv[1]` (two processes, two
-//! files), overridable per key by `SOVRA_COSIGNER_*` environment variables.
+//! Cosigner configuration: file path passed as `argv[1]` (one process per
+//! party, one file each), overridable per key by `SOVRA_COSIGNER_*`
+//! environment variables.
 //!
 //! Why the `config` crate: same file + env layering as sovra-api, one idiom
-//! across both binaries. `party_id` is validated here (must be 0 or 1) so the
-//! rest of the crate can index `[T; 2]` arrays positionally without checking.
-//! `ttl_secs` (default 60) is the MPC run timeout — kept below the
-//! orchestrator's 90s HTTP timeout by convention.
+//! across both binaries. `participants` is the full ordered ed25519 roster
+//! (hex verifying keys, index = global party id, **including this party's
+//! own**) — validated here together with `party_id`/`threshold` so the rest
+//! of the crate can index it positionally without checking. `ttl_secs`
+//! (default 60) is the MPC run timeout — kept below the orchestrator's 90s
+//! HTTP timeout by convention.
 //! Pattern: layered configuration, validated at the edge.
 
 use config::{Config as RawConfig, ConfigError, Environment, File};
@@ -14,6 +17,14 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub party_id: u8,
+    /// t in t-of-n; n is the length of `participants`.
+    #[serde(default = "default_threshold")]
+    pub threshold: u8,
+    /// Full roster of hex ed25519 verifying keys, index = party id, own key
+    /// included. `None` = bootstrap mode: the process serves `/identity` so
+    /// operators can collect the keys, but dkg/sign 409 until it is set.
+    /// Env override: `SOVRA_COSIGNER_PARTICIPANTS=hex0,hex1,hex2`.
+    pub participants: Option<Vec<String>>,
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
     pub data_dir: String,
@@ -27,7 +38,6 @@ pub struct Config {
     pub tls_key_path: String,
     #[serde(default = "default_relay_url")]
     pub relay_url: String,
-    pub peer_verifying_key: Option<String>,
     #[serde(default = "default_ttl_secs")]
     pub ttl_secs: u64,
 }
@@ -41,21 +51,43 @@ fn default_relay_url() -> String {
 fn default_ttl_secs() -> u64 {
     60
 }
+fn default_threshold() -> u8 {
+    2
+}
 
 impl Config {
     /// Unlike sovra-api's fixed `config/sepolia`, the file is a parameter —
-    /// two cosigner processes need two configs.
+    /// each cosigner process needs its own config.
     pub fn load(path: &str) -> Result<Self, ConfigError> {
         let cfg: Self = RawConfig::builder()
             .add_source(File::with_name(path).required(true))
-            .add_source(Environment::with_prefix("SOVRA_COSIGNER").try_parsing(true))
+            .add_source(
+                Environment::with_prefix("SOVRA_COSIGNER")
+                    .try_parsing(true)
+                    .list_separator(",")
+                    .with_list_parse_key("participants"),
+            )
             .build()?
             .try_deserialize()?;
-        if cfg.party_id > 1 {
-            return Err(ConfigError::Message(format!(
-                "party_id must be 0 or 1, got {}",
-                cfg.party_id
-            )));
+        if let Some(participants) = &cfg.participants {
+            let n = participants.len();
+            if n < 2 {
+                return Err(ConfigError::Message(format!(
+                    "participants must list at least 2 parties, got {n}"
+                )));
+            }
+            if cfg.party_id as usize >= n {
+                return Err(ConfigError::Message(format!(
+                    "party_id {} out of range for {n} participants",
+                    cfg.party_id
+                )));
+            }
+            if !(2..=n).contains(&(cfg.threshold as usize)) {
+                return Err(ConfigError::Message(format!(
+                    "threshold {} out of bounds for {n} participants",
+                    cfg.threshold
+                )));
+            }
         }
         Ok(cfg)
     }
@@ -75,6 +107,12 @@ mod tests {
         "policy_path = \"policy.toml\"\n",
     );
 
+    const TLS: &str = concat!(
+        "tls_ca_path = \"ca.pem\"\n",
+        "tls_cert_path = \"c.pem\"\n",
+        "tls_key_path = \"k.pem\"\n",
+    );
+
     /// Startup mirror of the policy rule: a config without TLS material must
     /// not load — there is no plaintext mode to fall back to.
     #[test]
@@ -87,11 +125,32 @@ mod tests {
     #[test]
     fn full_config_loads_and_defaults_apply() {
         let dir = tempfile::tempdir().unwrap();
-        let body = format!(
-            "{REQUIRED_SANS_TLS}tls_ca_path = \"ca.pem\"\ntls_cert_path = \"c.pem\"\ntls_key_path = \"k.pem\"\n"
-        );
+        let body = format!("{REQUIRED_SANS_TLS}{TLS}");
         let cfg = super::Config::load(&write_config(&dir, &body)).unwrap();
         assert_eq!(cfg.bind_addr, "127.0.0.1:4100"); // serde default applied
         assert_eq!(cfg.ttl_secs, 60);
+        assert_eq!(cfg.threshold, 2); // t-of-n default
+        assert!(cfg.participants.is_none()); // bootstrap mode is legal
+    }
+
+    /// The roster invariants are validated at load: party_id must index into
+    /// the list, and the threshold must fit 2..=n.
+    #[test]
+    fn roster_bounds_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let roster3 = "participants = [\"aa\", \"bb\", \"cc\"]\n";
+
+        let body = format!("party_id = 3\ndata_dir = \"d\"\npolicy_path = \"p\"\n{TLS}{roster3}");
+        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // id 3 of n=3
+
+        let body = format!("{REQUIRED_SANS_TLS}{TLS}{roster3}threshold = 4\n");
+        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // t > n
+
+        let body = format!("{REQUIRED_SANS_TLS}{TLS}participants = [\"aa\"]\n");
+        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // n < 2
+
+        let body = format!("{REQUIRED_SANS_TLS}{TLS}{roster3}");
+        let cfg = super::Config::load(&write_config(&dir, &body)).unwrap();
+        assert_eq!(cfg.participants.unwrap().len(), 3); // 2-of-3 loads
     }
 }

@@ -1,0 +1,12 @@
+# Cloud/cold recovery party — online for DKG and recovery ceremonies only;
+# normally stopped. It is listed LAST in the orchestrator's preference order,
+# so it is never drawn into signing while both preferred cosigners are up.
+party_id = 2
+bind_addr = "127.0.0.1:4102"
+data_dir = "data/cosigner2"
+relay_url = "wss://127.0.0.1:3100/ws"
+policy_path = "config/policy2.toml"
+# mTLS material (seeded by `cargo xtask certs`); missing files abort startup
+tls_ca_path = "certs/ca.cert.pem"
+tls_cert_path = "certs/cosigner2.cert.pem"
+tls_key_path = "certs/cosigner2.key.pem"

@@ -21,7 +21,7 @@ use axum::{Json, extract::State};
 use sovra_eth::{decode_unsigned, prepare::validate_unsigned};
 use sovra_ipc::{
     client::WsRelay,
-    control::{Identity, SignParts, SignerInfo, StartDkgRequest, StartSignRequest},
+    control::{Identity, RosterInfo, SignParts, SignerInfo, StartDkgRequest, StartSignRequest},
 };
 use sovra_mpc_dkls23_silence::{keygen_party, sign_party};
 use sovra_policy::{TxView, Verdict};
@@ -42,6 +42,18 @@ pub async fn dkg(
         Err(e) => return Err(e.into()),
     }
     let ctx = state.ctx(req.instance)?;
+    // The request's (n, t) are assertions, not inputs: the keygen setup is
+    // always built from this party's own config; divergence is a 409, so a
+    // misconfigured fleet fails as config instead of an opaque MPC timeout.
+    if req.n_parties as usize != ctx.party_vks.len() || req.threshold != state.threshold {
+        return Err(CosignerError::RosterMismatch(format!(
+            "orchestrator expects {}-of-{}, this party is configured {}-of-{}",
+            req.threshold,
+            req.n_parties,
+            state.threshold,
+            ctx.party_vks.len()
+        )));
+    }
     // dial per run, 502 on refusal
     let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
     let (share, address) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay))
@@ -67,6 +79,31 @@ pub async fn sign(
     let prepared = decode_unsigned(&req.unsigned_transaction)
         .map_err(|e| CosignerError::Undecodable(e.to_string()))?;
     validate_unsigned(&prepared.tx).map_err(|e| CosignerError::Undecodable(e.to_string()))?;
+    // Subset validation precedes policy on purpose: a subset that is
+    // malformed or excludes this party is an orchestrator bug, not a signing
+    // decision — the policy log must not record a verdict for a request this
+    // party was never actually part of.
+    let n = state
+        .roster
+        .as_ref()
+        .ok_or(CosignerError::RosterUnset)?
+        .len();
+    let subset = &req.participants;
+    if subset.len() != state.threshold as usize
+        || !subset.windows(2).all(|w| w[0] < w[1])
+        || subset.iter().any(|&p| p as usize >= n)
+    {
+        return Err(CosignerError::InvalidSubset(format!(
+            "{subset:?} is not {} strictly ascending party ids < {n}",
+            state.threshold
+        )));
+    }
+    if !subset.contains(&state.party_id) {
+        return Err(CosignerError::InvalidSubset(format!(
+            "party {} is not in {subset:?}",
+            state.party_id
+        )));
+    }
     // Policy runs before the shard is even loaded: on deny nothing was
     // dialed, there is no session to clean up, and the op lock frees on
     // return. The verdict logs (allow AND deny, digest + correlation id via
@@ -91,11 +128,19 @@ pub async fn sign(
     let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
     let parts = tokio::time::timeout(
         state.ttl,
-        sign_party(&ctx, &share, prepared.signing_hash, relay),
+        sign_party(&ctx, &share, prepared.signing_hash, subset, relay),
     )
     .await
     .map_err(|_| CosignerError::RunTimeout)??;
     Ok(Json(parts.into()))
+}
+
+/// DKG pre-flight probe: what scheme this party believes it is in, with the
+/// roster committed to as a hash — never the keys themselves.
+pub async fn roster(
+    State(state): State<Arc<CosignerState>>,
+) -> Result<Json<RosterInfo>, CosignerError> {
+    Ok(Json(state.roster_info()?))
 }
 
 pub async fn signer(

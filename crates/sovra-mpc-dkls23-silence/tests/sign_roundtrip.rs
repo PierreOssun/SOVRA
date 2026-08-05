@@ -19,10 +19,13 @@ fn base_intent() -> TxIntent {
 #[tokio::test(flavor = "multi_thread")]
 async fn dkg_sign_finalize_roundtrip() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let backend = InProcessBackend::new([
-        SignerStore::open(dir.path().join("party0")).expect("store 0"),
-        SignerStore::open(dir.path().join("party1")).expect("store 1"),
-    ]);
+    let backend = InProcessBackend::new(
+        vec![
+            SignerStore::open(dir.path().join("party0")).expect("store 0"),
+            SignerStore::open(dir.path().join("party1")).expect("store 1"),
+        ],
+        2,
+    );
 
     let address = backend.dkg().await.expect("dkg");
 

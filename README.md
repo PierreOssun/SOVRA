@@ -1,6 +1,8 @@
-# 2-of-2 MPC Signer – DKLs23
+# 2-of-3 MPC Signer – DKLs23
 
-This repo showcases a 2-of-2 MPC signer.
+This repo showcases a t-of-n MPC signer, deployed as 2-of-3: two active
+cosigners plus a cold recovery shard (cloud-hosted in production, online only
+for DKG and recovery).
 
 Prepares, signs, and broadcasts Ethereum transactions using threshold signatures (MPC).
 
@@ -16,7 +18,7 @@ External actors (calls to the public API, and the Sepolia RPC node) are not comp
 
 ### 1.2 DKG workflow
 
-A one-time ceremony. The Orchestrator triggers DKG on both cosigners. Then the cosigners run the DKLs23 DKG rounds directly P2P and each persists its own share.
+A one-time ceremony. The Orchestrator triggers DKG on all n cosigners (all must be online). Then the cosigners run the DKLs23 DKG rounds directly P2P and each persists its own share.
 
 The derived address is reported back and independently verified by the operator.
 
@@ -24,7 +26,7 @@ The derived address is reported back and independently verified by the operator.
 
 ### 1.3 Signing and broadcast workflow
 
-The runtime path. The client calls the Orchestrator (sovra-api) to prepare and sign. Then the Orchestrator triggers signing on both cosigners.
+The runtime path. The client calls the Orchestrator (sovra-api) to prepare and sign. Then the Orchestrator selects t ready cosigners (config preference order, cold party last) and triggers signing on exactly those.
 
 The cosigners run the DKLs23 rounds directly P2P and return the final signature.
 
@@ -59,7 +61,7 @@ so the operator can independently verify the derived address.
 
 ### `POST /v1/sign`
 
-Execute signing across both cosigners over the supplied unsigned transaction.
+Execute signing across the selected t cosigners over the supplied unsigned transaction.
 Request: `{ unsigned_transaction }` — the `0x02…`-prefixed bytes from `prepare`
 
 Response: `{ signed_transaction, signature: { r, s, y_parity }, recovered_address, tx_digest }`.
@@ -72,11 +74,11 @@ Submit the signed transaction to Sepolia and wait up to 30 seconds for a receipt
 
 ## Goal of this repository:
 
-- DKG (Distributed Key Generation) sets up 2 shards - DKLs23 DKG
+- DKG (Distributed Key Generation) sets up 3 shards (2-of-3) - DKLs23 DKG
 - Take a tx hash to sign a Sepolia transaction - DKLs23 rounds
 - Broadcast it – using a public RPC
 - Be verifiable on Etherscan
-- Two shards on different machines: one in a raspberry pi & one hosted on cloud (for demo purposes)
+- Shards on different machines: one on a raspberry pi, one local, and the cold recovery shard hosted on cloud (for demo purposes)
 
 ## Out of scope, for now
 
@@ -89,7 +91,7 @@ These are deliberate deferrals, not gaps:
 - Observability backend (local JSON logs only)
 - Multi-chain support (Sepolia only)
 - Automated backup and restore (manual archive only)
-- Recovery beyond 2-of-2 threshold
+- The recovery re-share ceremony (`key_refresh` — rebuild a lost shard, same address) and sealing the cloud shard at rest: M10
 
 /!\ This repo is for demo purposes only.     
 

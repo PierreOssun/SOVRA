@@ -1,10 +1,13 @@
 //! Process wiring for the cosigner binary: config (`argv[1]`) → identity →
-//! pinned peer key → shard store → `CosignerState` → serve the control API.
+//! pinned roster → shard store → `CosignerState` → serve the control API.
 //!
 //! Choices worth knowing: the verifying key is logged on every start because
-//! pinning it in the peer's config is a manual operator step; a missing peer
-//! key is a warning at startup but a 409 at use, so a half-configured
+//! pinning it in every party's roster is a manual operator step; a missing
+//! roster is a warning at startup but a 409 at use, so a half-configured
 //! cosigner still serves `/identity` (needed to bootstrap the pairing).
+//! The startup self-check (`roster[party_id]` must equal this process's own
+//! key) turns the classic swapped-roster misconfiguration into a boot
+//! failure instead of a silent DKG stall.
 //! The correlation middleware differs from sovra-api's on purpose — this end
 //! ACCEPTS the incoming id so one id threads through all processes' logs.
 //! Pattern: composition root for the cosigner process.
@@ -30,16 +33,32 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_dir = Path::new(&config.data_dir);
     let signing_key = identity::load_or_generate(data_dir)?;
-    // Operator UX: this is what gets pinned in the peer's config — print it every start.
+    // Operator UX: this is what gets pinned in every roster — print it every start.
     tracing::info!(
         party_id = config.party_id,
         verifying_key = %alloy_primitives::hex::encode(signing_key.verifying_key().as_bytes()),
         "cosigner identity",
     );
-    let peer_vk = match &config.peer_verifying_key {
-        Some(hex) => Some(parse_vk(hex)?), // hex decode -> [u8; 32] -> VerifyingKey::from_bytes (errors on bad point)
+    let roster = match &config.participants {
+        Some(hexes) => {
+            let roster = hexes
+                .iter()
+                .map(|hex| parse_vk(hex)) // hex -> [u8; 32] -> VerifyingKey::from_bytes (errors on bad point)
+                .collect::<Result<Vec<_>, _>>()?;
+            // Self-check: a roster whose own slot holds someone else's key is
+            // the swapped-list misconfiguration — fail at boot, not as an
+            // opaque DKG stall.
+            if roster[config.party_id as usize] != signing_key.verifying_key() {
+                return Err(format!(
+                    "config participants[{}] does not match this cosigner's identity key",
+                    config.party_id
+                )
+                .into());
+            }
+            Some(roster)
+        }
         None => {
-            tracing::warn!("peer verifying key not configured; dkg/sign will 409");
+            tracing::warn!("participant roster not configured; dkg/sign will 409");
             None
         }
     };
@@ -65,7 +84,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(CosignerState {
         party_id: config.party_id,
         signing_key,
-        peer_vk,
+        roster,
+        threshold: config.threshold,
         store,
         relay_url: config.relay_url,
         relay_tls: tls.ws_client_config()?,
@@ -85,6 +105,7 @@ pub fn build_router(state: Arc<CosignerState>) -> Router {
         .route("/dkg", post(api::dkg))
         .route("/sign", post(api::sign))
         .route("/signer", get(api::signer))
+        .route("/roster", get(api::roster))
         .route("/identity", get(api::identity))
         .route("/health", get(api::health))
         .layer(axum::middleware::from_fn(correlation))
@@ -103,7 +124,7 @@ fn parse_vk(hex: &str) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
     let bytes: [u8; 32] = alloy_primitives::hex::decode(hex)?
         .as_slice()
         .try_into()
-        .map_err(|_| "peer verifying key must be 32 bytes")?;
+        .map_err(|_| "participant verifying key must be 32 bytes")?;
     Ok(VerifyingKey::from_bytes(&bytes)?) // rejects bytes that aren't a valid curve point
 }
 

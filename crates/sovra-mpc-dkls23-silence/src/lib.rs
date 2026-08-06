@@ -26,8 +26,9 @@ use alloy_primitives::{Address, B256};
 use derivation_path::DerivationPath;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use k256::ecdsa::VerifyingKey as K256VerifyingKey;
+pub use sl_dkls23::keygen::Keyshare;
 use sl_dkls23::{
-    keygen::{self, Keyshare},
+    keygen::{self},
     setup::{keygen::SetupMessage as KeygenSetup, sign::SetupMessage as SignSetup},
     sign,
 };
@@ -84,6 +85,35 @@ impl InProcessBackend {
             ttl: self.ttl,
         }
     }
+
+    /// Shared tail of dkg and refresh: collect every party's (share, address),
+    /// require address consensus, persist all shards atomically.
+    fn persist_generation(
+        &self,
+        results: Vec<Result<(KeyShare, Address), MpcError>>,
+        op: &str,
+    ) -> Result<Address, MpcError> {
+        let mut pairs = Vec::with_capacity(results.len());
+        for r in results {
+            pairs.push(r?);
+        }
+        let address = pairs[0].1;
+        if let Some((_, other)) = pairs.iter().find(|(_, addr)| *addr != address) {
+            return Err(MpcError::PartyMismatch(format!(
+                "{op} addresses differ: {address} != {other}"
+            )));
+        }
+        let meta = SignerMetadata {
+            signer_id: SignerId::new(ACTIVE_SIGNER_ID),
+            address,
+        };
+        for (store, (share, _)) in self.stores.iter().zip(&pairs) {
+            store
+                .save_shard(&meta, share)
+                .map_err(|e| MpcError::Dkg(e.to_string()))?;
+        }
+        Ok(address)
+    }
 }
 impl MpcBackend for InProcessBackend {
     async fn dkg(&self) -> Result<Address, MpcError> {
@@ -97,27 +127,7 @@ impl MpcBackend for InProcessBackend {
             ctxs.iter().map(|ctx| keygen_party(ctx, coord.connect())),
         )
         .await;
-        let mut pairs = Vec::with_capacity(results.len());
-        for r in results {
-            pairs.push(r?);
-        }
-        let address = pairs[0].1;
-        if let Some((_, other)) = pairs.iter().find(|(_, addr)| *addr != address) {
-            return Err(MpcError::PartyMismatch(format!(
-                "dkg addresses differ: {address} != {other}"
-            )));
-        }
-
-        let meta = SignerMetadata {
-            signer_id: SignerId::new(ACTIVE_SIGNER_ID),
-            address,
-        };
-        for (store, (share, _)) in self.stores.iter().zip(&pairs) {
-            store
-                .save_shard(&meta, share)
-                .map_err(|e| MpcError::Dkg(e.to_string()))?;
-        }
-        Ok(address)
+        self.persist_generation(results, "dkg")
     }
 
     async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
@@ -163,6 +173,59 @@ impl MpcBackend for InProcessBackend {
         }
         Ok(parts)
     }
+
+    /// All n parties in one process. Whatever the lost store still holds is
+    /// ignored (production instead refuses a declared-lost party that has a
+    /// shard) — this backend exists to pin the HTTP contract, and letting it
+    /// run without file surgery keeps the api tests simple.
+    async fn refresh(&self, lost_party: u8) -> Result<Address, MpcError> {
+        let n = self.stores.len();
+        if lost_party as usize >= n {
+            return Err(MpcError::Dkg(format!(
+                "lost party {lost_party} out of range for {n} parties"
+            )));
+        }
+        let id = SignerId::new(ACTIVE_SIGNER_ID);
+        let mut shares: Vec<Option<KeyShare>> = Vec::with_capacity(n);
+        for (party, store) in self.stores.iter().enumerate() {
+            if party == lost_party as usize {
+                shares.push(None);
+            } else {
+                shares.push(Some(
+                    store
+                        .load_shard(&id)
+                        .map_err(|e| MpcError::Dkg(e.to_string()))?,
+                ));
+            }
+        }
+        let survivor = shares
+            .iter()
+            .flatten()
+            .next()
+            .expect("n >= 2 leaves at least one survivor");
+        let public_key = compressed_public_key(
+            &Keyshare::from_bytes(survivor.as_bytes()).ok_or(MpcError::Deserialize)?,
+        );
+
+        let instance = B256::from(rand::random::<[u8; 32]>());
+        let coord = SimpleMessageRelay::new();
+        let ctxs: Vec<PartyContext> = (0..n as u8).map(|p| self.ctx(p, instance)).collect();
+        let results =
+            futures_util::future::join_all(ctxs.iter().zip(&shares).map(|(ctx, share)| {
+                refresh_party(
+                    ctx,
+                    share.as_ref(),
+                    lost_party,
+                    &public_key,
+                    coord.connect(),
+                )
+            }))
+            .await;
+        // The atomic swap: every store overwrites its shard; old and new
+        // generations do not interoperate, so partial persistence would be
+        // caught by the next sign's keyshare cross-checks.
+        self.persist_generation(results, "refresh")
+    }
 }
 
 /// Ethereum address from a keyshare's shared public key. Reuses alloy's
@@ -174,13 +237,27 @@ pub fn address_from_keyshare(keyshare: &Keyshare) -> Result<Address, MpcError> {
     Ok(Address::from_public_key(&vk))
 }
 
-/// This party's share of a t-of-n DKG over the full roster. Returns its own
-/// shard (opaque bytes for the store) and the address it independently
-/// derived from that shard.
-pub async fn keygen_party(
+/// Compressed SEC1 encoding (33 bytes) of a keyshare's shared public key —
+/// the value a refresh ceremony's lost party needs as `expected_public_key`.
+pub fn compressed_public_key(keyshare: &Keyshare) -> [u8; 33] {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    keyshare
+        .public_key()
+        .to_affine()
+        .to_encoded_point(true)
+        .as_bytes()
+        .try_into()
+        .expect("a compressed sec1 point is 33 bytes")
+}
+
+/// Validated setup for the ceremonies that involve ALL n parties (keygen and
+/// key-refresh share it verbatim): global ids, full roster, all-zero ranks.
+/// The one place the scheme bounds (`2 <= t <= n`, `party_id < n`) are
+/// checked. The library copies `ranks` into the message, so no lifetime
+/// escapes.
+fn keygen_setup(
     ctx: &PartyContext,
-    relay: impl Relay,
-) -> Result<(KeyShare, Address), MpcError> {
+) -> Result<KeygenSetup<SigningKey, VerifyingKey, ed25519_dalek::Signature>, MpcError> {
     let n = ctx.party_vks.len();
     if !(2..=n).contains(&(ctx.threshold as usize)) || ctx.party_id as usize >= n {
         return Err(MpcError::Dkg(format!(
@@ -189,17 +266,129 @@ pub async fn keygen_party(
         )));
     }
     let ranks = vec![0u8; n];
-
-    let setup = KeygenSetup::new(
+    Ok(KeygenSetup::new(
         InstanceId::new(ctx.instance.0), // B256 -> [u8; 32]
         ctx.signing_key.clone(),
-        ctx.party_id as usize, // keygen is indexed by GLOBAL id — unlike sign
+        ctx.party_id as usize, // keygen/refresh are indexed by GLOBAL id — unlike sign
         ctx.party_vks.clone(),
         &ranks,
         ctx.threshold as usize,
     )
-    .with_ttl(ctx.ttl);
+    .with_ttl(ctx.ttl))
+}
 
+/// This party's share of a key-refresh ceremony: all n parties rebuild their
+/// shards around the same public key; `lost_party` (which brings no shard)
+/// gets a brand-new one. Survivors pass `Some(old_share)`, the lost party
+/// `None` — any other combination is refused before the relay is touched.
+/// The library enforces that the reconstructed key equals `public_key`, so a
+/// wrong expected key fails the ceremony instead of corrupting anything.
+pub async fn refresh_party(
+    ctx: &PartyContext,
+    old_share: Option<&KeyShare>,
+    lost_party: u8,
+    public_key: &[u8; 33],
+    relay: impl Relay,
+) -> Result<(KeyShare, Address), MpcError> {
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    let setup = keygen_setup(ctx)?;
+    let n = ctx.party_vks.len();
+    if lost_party as usize >= n {
+        return Err(MpcError::Dkg(format!(
+            "lost party {lost_party} out of range for {n} parties"
+        )));
+    }
+    // The library enforces lost_count <= n - t; with one lost party that
+    // means t == n (e.g. 2-of-2) has no redundancy to rebuild from — name it
+    // instead of surfacing an opaque InvalidKeyRefresh.
+    if ctx.threshold as usize == n {
+        return Err(MpcError::Dkg(format!(
+            "a {n}-of-{n} scheme has no redundancy to recover a lost share",
+        )));
+    }
+    let encoded = k256::EncodedPoint::from_bytes(public_key)
+        .map_err(|e| MpcError::Dkg(format!("bad expected public key: {e}")))?;
+    let expected =
+        Option::<k256::ProjectivePoint>::from(k256::ProjectivePoint::from_encoded_point(&encoded))
+            .ok_or_else(|| MpcError::Dkg("expected public key is not a curve point".into()))?;
+
+    let refresh_input = match (old_share, ctx.party_id == lost_party) {
+        (None, true) => keygen::key_refresh::KeyshareForRefresh::from_lost_keyshare(
+            vec![0u8; n],
+            ctx.threshold,
+            expected,
+            vec![lost_party],
+            ctx.party_id,
+        ),
+        (Some(share), false) => {
+            let keyshare = Keyshare::from_bytes(share.as_bytes()).ok_or(MpcError::Deserialize)?;
+            if keyshare.party_id != ctx.party_id
+                || keyshare.total_parties as usize != n
+                || keyshare.threshold != ctx.threshold
+            {
+                return Err(MpcError::Dkg(format!(
+                    "keyshare/scheme mismatch: shard is party {} of {}-of-{}, \
+                     refresh runs as party {} of {}-of-{n}",
+                    keyshare.party_id,
+                    keyshare.threshold,
+                    keyshare.total_parties,
+                    ctx.party_id,
+                    ctx.threshold,
+                )));
+            }
+            if compressed_public_key(&keyshare) != *public_key {
+                return Err(MpcError::PartyMismatch(
+                    "expected public key does not match this party's shard".into(),
+                ));
+            }
+            keygen::key_refresh::KeyshareForRefresh::from_keyshare(
+                &keyshare,
+                Some(vec![lost_party]),
+            )
+        }
+        (Some(_), true) => {
+            return Err(MpcError::Dkg(format!(
+                "party {} is declared lost but still holds a shard — delete its store first",
+                ctx.party_id
+            )));
+        }
+        (None, false) => {
+            return Err(MpcError::Dkg(format!(
+                "party {} has no shard but is not the declared lost party",
+                ctx.party_id
+            )));
+        }
+    };
+
+    let stats = Stats::alloc();
+    let keyshare = keygen::key_refresh::run(
+        setup,
+        rand::random(),
+        RelayStats::new(relay, stats.clone()),
+        refresh_input,
+    )
+    .await
+    .map_err(|e| MpcError::Dkg(e.to_string()))?;
+    log_bandwidth(ctx.party_id, &stats, "refresh");
+
+    // Belt over the protocol's own expected_public_key check.
+    if compressed_public_key(&keyshare) != *public_key {
+        return Err(MpcError::PartyMismatch(
+            "refresh produced a different public key".into(),
+        ));
+    }
+    let address = address_from_keyshare(&keyshare)?;
+    Ok((KeyShare::from(keyshare.as_slice().to_vec()), address))
+}
+
+/// This party's share of a t-of-n DKG over the full roster. Returns its own
+/// shard (opaque bytes for the store) and the address it independently
+/// derived from that shard.
+pub async fn keygen_party(
+    ctx: &PartyContext,
+    relay: impl Relay,
+) -> Result<(KeyShare, Address), MpcError> {
+    let setup = keygen_setup(ctx)?;
     let stats = Stats::alloc();
     let keyshare = keygen::run(setup, rand::random(), RelayStats::new(relay, stats.clone()))
         .await

@@ -35,6 +35,28 @@ pub struct StartSignRequest {
     pub participants: Vec<u8>,
 }
 
+/// `POST /refresh` body — one party's view of the recovery re-share
+/// ceremony. Like DKG, `n_parties`/`threshold` are assertions against local
+/// config. `public_key` (33-byte compressed SEC1) is the ceremony's anchor:
+/// survivors verify it against their own shard, the lost party adopts it as
+/// the expected reconstruction target — a wrong value fails the ceremony.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartRefreshRequest {
+    pub instance: B256,
+    pub n_parties: u8,
+    pub threshold: u8,
+    pub lost_party: u8,
+    pub public_key: Bytes,
+}
+
+/// `GET /pubkey` response: the wallet's compressed SEC1 public key, derived
+/// from this party's shard. Public data — it is the key the whole world can
+/// already compute from any on-chain signature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicKeyInfo {
+    pub public_key: Bytes,
+}
+
 /// `GET /roster` response — the DKG pre-flight consistency probe. The
 /// orchestrator only compares these for equality across parties (and against
 /// its own n/threshold config); the hash definition lives in sovra-cosigner.

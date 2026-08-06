@@ -22,6 +22,12 @@ pub trait MpcBackend {
     /// deliberately cannot express "sign this opaque digest".
     fn sign(&self, unsigned_tx: &[u8])
     -> impl Future<Output = Result<EcdsaParts, MpcError>> + Send;
+
+    /// Recovery re-share ceremony: all n parties rebuild their shards around
+    /// the unchanged public key, with `lost_party`'s shard reconstructed
+    /// from scratch and every old shard rendered useless. Returns the
+    /// (unchanged) address — callers verify it against the active one.
+    fn refresh(&self, lost_party: u8) -> impl Future<Output = Result<Address, MpcError>> + Send;
 }
 
 /// ECDSA signature components

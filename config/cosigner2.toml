@@ -10,3 +10,8 @@ policy_path = "config/policy2.toml"
 tls_ca_path = "certs/ca.cert.pem"
 tls_cert_path = "certs/cosigner2.cert.pem"
 tls_key_path = "certs/cosigner2.key.pem"
+# Shard sealing at rest (recommended for the cloud host): generate a key with
+#   openssl rand -hex 32 > certs/seal2.key
+# and uncomment. Set it BEFORE the first dkg — enabling it later requires a
+# manual re-seal of the existing shard (or a /v1/recover ceremony).
+# seal_key_path = "certs/seal2.key"

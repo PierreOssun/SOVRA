@@ -77,6 +77,41 @@ pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
     Ok(Json(DkgResponse { address }))
 }
 
+/// Operator endpoint: the recovery re-share ceremony. All n cosigners
+/// (including the normally-cold recovery party) must be online; the
+/// declared-lost party rebuilds its shard from scratch, every other shard
+/// re-randomizes, and the address must come back unchanged — a different
+/// one is a broken invariant, not a result.
+#[utoipa::path(post, path = "/v1/recover", request_body = RecoverRequest)]
+pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
+    Json(body): Json<RecoverRequest>,
+) -> Result<Json<DkgResponse>, ApiError> {
+    let _op = state
+        .signer
+        .op
+        .try_lock()
+        .map_err(|_| ApiError::SigningInProgress)?;
+
+    let active = state
+        .signer
+        .state
+        .read()
+        .unwrap()
+        .active
+        .ok_or(ApiError::DkgNotInitialized)?;
+
+    let address = state.backend.refresh(body.lost_party).await?;
+    if address != active {
+        return Err(ApiError::Mpc(sovra_mpc::MpcError::PartyMismatch(format!(
+            "refresh returned {address}, active generation is {active}"
+        ))));
+    }
+
+    tracing::info!(%address, lost_party = body.lost_party, "recovery re-share complete");
+    Ok(Json(DkgResponse { address }))
+}
+
 #[utoipa::path(get, path = "/v1/dkg")]
 pub async fn dkg_get<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
@@ -200,13 +235,22 @@ pub struct SignRequest {
     unsigned_transaction: Bytes,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct RecoverRequest {
+    /// Global id of the party whose shard is being rebuilt. Its store must
+    /// be empty (a rebuilt host), and its new identity must already be in
+    /// every party's pinned roster.
+    pub lost_party: u8,
+}
+
 #[derive(OpenApi)]
 #[openapi(
-    paths(dkg_create, dkg_get, prepare, sign),
+    paths(dkg_create, dkg_get, prepare, sign, recover),
     components(schemas(
         DkgResponse,
         PrepareRequest,
         PrepareResponse,
+        RecoverRequest,
         SignRequest,
         SignatureParts,
         SignResponse

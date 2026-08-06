@@ -4776,6 +4776,8 @@ name = "sovra-state"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "chacha20poly1305",
+ "rand 0.8.6",
  "serde_json",
  "sovra-types",
  "tempfile",

@@ -5,7 +5,7 @@ use ed25519_dalek::SigningKey;
 use sl_mpc_mate::coord::SimpleMessageRelay;
 use sovra_types::KeyShare;
 
-use crate::{keygen_party, sign_party, types::PartyContext};
+use crate::{keygen_party, refresh_party, sign_party, types::PartyContext};
 
 fn contexts(n: u8, threshold: u8, instance: B256) -> Vec<PartyContext> {
     let sks: Vec<SigningKey> = (0..n)
@@ -119,4 +119,152 @@ async fn sign_rejects_subset_without_this_party() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("strictly ascending"), "{err}");
+}
+
+/// The M10 crypto pin: 2-of-3 keygen, party 1's shard is lost, the
+/// replacement host has a BRAND-NEW ed25519 identity. All three run the
+/// refresh ceremony; the recovered shard signs at the same address, and a
+/// surviving OLD shard can no longer co-sign with the new generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_recovers_lost_shard_and_kills_old_generation() {
+    let ctxs = contexts(3, 2, B256::from(rand::random::<[u8; 32]>()));
+
+    let coord = SimpleMessageRelay::new();
+    let (r0, r1, r2) = tokio::join!(
+        keygen_party(&ctxs[0], coord.connect()),
+        keygen_party(&ctxs[1], coord.connect()),
+        keygen_party(&ctxs[2], coord.connect()),
+    );
+    let (share0, address) = r0.unwrap();
+    let (old_share1, _) = r1.unwrap();
+    let (share2, _) = r2.unwrap();
+
+    // Party 1's host is rebuilt: fresh identity key, roster updated on all
+    // parties (config + restart in production).
+    let new_sk1 = SigningKey::generate(&mut rand::rngs::OsRng);
+    let refresh_instance = B256::from(rand::random::<[u8; 32]>());
+    let mut refresh_ctxs = ctxs;
+    for ctx in &mut refresh_ctxs {
+        ctx.instance = refresh_instance;
+        ctx.party_vks[1] = new_sk1.verifying_key();
+    }
+    refresh_ctxs[1].signing_key = new_sk1;
+
+    // The lost party's only crypto input besides its id: the wallet pubkey.
+    let public_key = crate::compressed_public_key(
+        &sl_dkls23::keygen::Keyshare::from_bytes(share0.as_bytes()).unwrap(),
+    );
+
+    let coord = SimpleMessageRelay::new();
+    let (n0, n1, n2) = tokio::join!(
+        refresh_party(
+            &refresh_ctxs[0],
+            Some(&share0),
+            1,
+            &public_key,
+            coord.connect()
+        ),
+        refresh_party(&refresh_ctxs[1], None, 1, &public_key, coord.connect()),
+        refresh_party(
+            &refresh_ctxs[2],
+            Some(&share2),
+            1,
+            &public_key,
+            coord.connect()
+        ),
+    );
+    let (new_share0, a0) = n0.unwrap();
+    let (new_share1, a1) = n1.unwrap();
+    let (_new_share2, a2) = n2.unwrap();
+    assert_eq!(a0, address, "refresh must not change the address");
+    assert_eq!(a1, address);
+    assert_eq!(a2, address);
+
+    // The RECOVERED shard signs: subset {0, 1} over the new generation.
+    let sign_instance = B256::from(rand::random::<[u8; 32]>());
+    for ctx in &mut refresh_ctxs {
+        ctx.instance = sign_instance;
+    }
+    let digest = B256::from(rand::random::<[u8; 32]>());
+    let coord = SimpleMessageRelay::new();
+    let (p0, p1) = tokio::join!(
+        sign_party(
+            &refresh_ctxs[0],
+            &new_share0,
+            digest,
+            &[0, 1],
+            coord.connect()
+        ),
+        sign_party(
+            &refresh_ctxs[1],
+            &new_share1,
+            digest,
+            &[0, 1],
+            coord.connect()
+        ),
+    );
+    let (p0, p1) = (p0.unwrap(), p1.unwrap());
+    assert_eq!(p0, p1);
+    let sig =
+        k256::ecdsa::Signature::from_scalars(p0.r.to_be_bytes::<32>(), p0.s.to_be_bytes::<32>())
+            .unwrap();
+    let recid = k256::ecdsa::RecoveryId::from_byte(p0.y_parity as u8).unwrap();
+    let vk =
+        k256::ecdsa::VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, recid).unwrap();
+    assert_eq!(Address::from_public_key(&vk), address);
+
+    // The OLD shard is dead: mixing it with a new-generation shard must not
+    // yield a signature that recovers to the wallet address. Depending on
+    // where the inconsistency surfaces, the run may error, stall, or emit
+    // garbage — every one of those outcomes is a pass; a valid signature is
+    // the only failure.
+    let mixed_instance = B256::from(rand::random::<[u8; 32]>());
+    let mut mixed_ctxs = refresh_ctxs.clone();
+    for ctx in &mut mixed_ctxs {
+        ctx.instance = mixed_instance;
+    }
+    // Transport identity is orthogonal to shard validity — give the attacker
+    // the best case: current roster, current identity, old shard bytes.
+    let coord = SimpleMessageRelay::new();
+    let mixed = async {
+        tokio::join!(
+            sign_party(
+                &mixed_ctxs[0],
+                &new_share0,
+                digest,
+                &[0, 1],
+                coord.connect()
+            ),
+            sign_party(
+                &mixed_ctxs[1],
+                &old_share1,
+                digest,
+                &[0, 1],
+                coord.connect()
+            ),
+        )
+    };
+    match tokio::time::timeout(Duration::from_secs(3), mixed).await {
+        Err(_elapsed) => {} // stall: pass
+        Ok((a, b)) => {
+            for parts in [a, b].into_iter().flatten() {
+                let sig = k256::ecdsa::Signature::from_scalars(
+                    parts.r.to_be_bytes::<32>(),
+                    parts.s.to_be_bytes::<32>(),
+                );
+                let recovered = sig.ok().and_then(|sig| {
+                    let recid = k256::ecdsa::RecoveryId::from_byte(parts.y_parity as u8)?;
+                    k256::ecdsa::VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, recid)
+                        .ok()
+                });
+                if let Some(vk) = recovered {
+                    assert_ne!(
+                        Address::from_public_key(&vk),
+                        address,
+                        "an old shard co-signed a valid signature after refresh"
+                    );
+                }
+            }
+        }
+    }
 }

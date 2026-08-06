@@ -3,11 +3,14 @@
 //!
 //! Why probe all n and compare: after a crash mid-DKG the stores can disagree
 //! (some shards written, some not). Serving with a half-provisioned key would
-//! be unsound, so disagreement among *reachable* parties refuses startup with
-//! an operator-facing remedy instead of guessing. Unreachable parties are
-//! tolerated as long as at least `threshold` answer — the cold recovery
-//! party is expected to be offline in normal operation. All reachable 404 →
-//! fresh install; all agree → recovered. Pattern: fail-fast startup gate.
+//! be unsound, so divergent addresses among *reachable* parties refuse
+//! startup with an operator-facing remedy instead of guessing. Unreachable
+//! parties are tolerated as long as at least `threshold` answer — the cold
+//! recovery party is expected to be offline in normal operation — and a
+//! reachable party with an EMPTY store is tolerated when a t-quorum of
+//! agreeing shards exists: that is a rebuilt host awaiting its `/v1/recover`
+//! ceremony, and refusing to boot would deadlock the recovery runbook.
+//! All reachable 404 → fresh install. Pattern: fail-fast startup gate.
 
 use alloy_primitives::Address;
 use sovra_ipc::remote::fetch_signer;
@@ -64,9 +67,29 @@ pub async fn recover_active(
             detail: unreachable.join("; "),
         });
     }
-    let consensus = reports[0].1;
-    if reports.iter().any(|(_, address)| *address != consensus) {
+    // A t-quorum of AGREEING shards is authoritative; a reachable party with
+    // an empty store is then "awaiting recovery" (a rebuilt host before its
+    // /v1/recover ceremony), not evidence of a torn DKG — refusing to start
+    // here would deadlock the recovery runbook. Divergent addresses, or
+    // shards without a t-quorum, remain fatal.
+    let somes: Vec<(u8, Address)> = reports
+        .iter()
+        .filter_map(|(party, address)| address.map(|a| (*party, a)))
+        .collect();
+    if somes.is_empty() {
+        return Ok(None);
+    }
+    let consensus = somes[0].1;
+    if somes.len() < threshold || somes.iter().any(|(_, a)| *a != consensus) {
         return Err(RecoverError::Inconsistent { reports });
     }
-    Ok(consensus)
+    for (party, address) in &reports {
+        if address.is_none() {
+            tracing::warn!(
+                party,
+                "cosigner reachable but has no shard — awaiting recovery (POST /v1/recover)"
+            );
+        }
+    }
+    Ok(Some(consensus))
 }

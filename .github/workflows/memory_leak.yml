@@ -52,6 +52,12 @@ jobs:
       # which times the job out. Their leak coverage lives in the manual
       # valgrind-mpc job below.
       - name: cargo valgrind test
+        # VALGRINDFLAGS is cargo-valgrind's pass-through for extra valgrind
+        # options. valgrind.supp suppresses known-benign lazy_static caches in
+        # the x509-parser dependency chain (interior-pointer "possibly lost").
+        # Absolute path: valgrind runs with cwd = the member crate's directory.
+        env:
+          VALGRINDFLAGS: --suppressions=${{ github.workspace }}/valgrind.supp
         run: >
           cargo valgrind test --workspace
           --exclude sovra-api
@@ -75,4 +81,8 @@ jobs:
       - name: Install cargo-valgrind
         run: cargo install cargo-valgrind --locked
       - name: cargo valgrind test (MPC crates)
+        # Same suppressions as the valgrind job above: cosigner/api exercise
+        # the mTLS cert paths, which hit the identical x509-parser statics.
+        env:
+          VALGRINDFLAGS: --suppressions=${{ github.workspace }}/valgrind.supp
         run: cargo valgrind test -p sovra-mpc-dkls23-silence -p sovra-cosigner -p sovra-api

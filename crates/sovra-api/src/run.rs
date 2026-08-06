@@ -84,6 +84,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 pub fn build_router<B: MpcBackend + Send + Sync + 'static>(state: AppState<B>) -> Router {
     Router::new()
         .route("/v1/dkg", post(api::dkg_create).get(api::dkg_get))
+        .route("/v1/recover", post(api::recover))
         .route("/v1/prepare", post(api::prepare))
         .route("/v1/sign", post(api::sign))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))

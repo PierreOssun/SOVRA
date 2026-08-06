@@ -37,6 +37,53 @@ still succeeds, now via {0, 2} (the orchestrator log shows
 liveness *before* any request; a policy veto from a selected party is final
 and never triggers failover to the cold party.
 
+### Recovery runbook (lost shard → re-share ceremony)
+
+When a party's host is lost (disk, theft, fire), the failover above is the
+**bridge**: the survivor + cold party keep signing. Real recovery is the
+re-share ceremony — it rebuilds the lost shard **at the same address** and
+re-randomizes every other shard, so the lost/stolen one becomes useless.
+Treat a lost shard as compromised: run the ceremony promptly.
+
+1. **Rebuild the host.** Start the cosigner with an empty `data_dir`; it
+   generates a fresh identity and logs its new verifying key (also served on
+   `GET /identity`). It will 409 dkg/sign until step 2 — that's expected.
+2. **Update the roster everywhere.** Put the new verifying key into
+   `participants` (same slot) in *every* cosigner's config — or the
+   `SOVRA_COSIGNER_PARTICIPANTS` env — and restart all cosigners, including
+   the cold one (the ceremony, like DKG, needs **all n online**).
+3. **Run the ceremony.** The orchestrator may be restarted at any point —
+   startup tolerates the rebuilt party's empty store ("awaiting recovery").
+   Then:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:3000/v1/recover \
+     -H 'content-type: application/json' -d '{ "lost_party": 1 }'
+   # → { "address": "0x…" }   ← MUST equal the existing signer address
+   ```
+
+4. **Verify and stand down.** Sign something (`sovra-cli sign`), confirm the
+   address, then stop the cold party again. Old backups of any shard are now
+   dead — the ceremony invalidated the entire previous generation.
+
+Notes: the declared-lost party must have an **empty** store (a present shard
+409s — delete it first: declaring the wrong party lost is refused, not
+absorbed). To rotate shards without a loss event, wipe one party's store
+deliberately and run the same ceremony; a rotation where every party keeps
+its slot needs `quorum_change` tooling (future milestone).
+
+### Shard sealing at rest (`seal_key_path`)
+
+Optional per cosigner: point `seal_key_path` at a file containing 64 hex
+chars (`openssl rand -hex 32 > certs/seal2.key`) and the party's `shard.bin`
+is XChaCha20-Poly1305-sealed on disk — recommended for any shard that leaves
+your desk (the cloud party, the Pi). Fail-closed on a bad key file, and a
+sealed store never falls back to plaintext. Enable it **before** the first
+DKG; to enable it on an existing plaintext shard, wipe that party's store
+and run the recovery ceremony above (the re-share writes the new shard
+sealed). The key file is the at-rest boundary: keep it OUT of the same
+backup as the shard, or the seal adds nothing.
+
 ### TLS material (`certs/`)
 
 Every internal socket (cosigner control APIs :4100/:4101, relay hub :3100) is

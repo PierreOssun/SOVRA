@@ -1,16 +1,23 @@
-//! End-to-end API flow over the in-process router — no network, no RPC:
-//! dkg lifecycle, content-addressed signing, idempotency, restart recovery.
+//! End-to-end API flow over the in-process router — no network, no live RPC
+//! (broadcast tests use alloy's FIFO mock transport): dkg lifecycle,
+//! content-addressed signing, idempotency, restart recovery, broadcast.
 
 mod test_helpers;
 use std::{str::FromStr, time::Duration};
 
 use alloy_consensus::{
-    TxEip1559, TxEnvelope, private::alloy_eips::Decodable2718, transaction::SignerRecoverable,
+    Receipt, ReceiptEnvelope, ReceiptWithBloom, TxEip1559, TxEnvelope,
+    private::alloy_eips::Decodable2718, transaction::SignerRecoverable,
 };
-use alloy_primitives::{Address, Bytes, TxKind};
-use alloy_provider::Provider;
+use alloy_primitives::{Address, B256, Bytes, TxKind, keccak256};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_transport::mock::Asserter;
 use axum::{Router, http::StatusCode};
-use sovra_api::{run::build_router, state::AppState};
+use sovra_api::{
+    run::build_router,
+    state::{AppState, BroadcastTiming},
+};
 use sovra_eth::encode_unsigned;
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
 use sovra_mpc_dkls23_silence::InProcessBackend;
@@ -18,17 +25,28 @@ use sovra_state::SignerStore;
 use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
 use test_helpers::*;
 
-fn test_router(dir0: &std::path::Path, dir1: &std::path::Path) -> Router {
+fn router_with(
+    dir0: &std::path::Path,
+    dir1: &std::path::Path,
+    provider: DynProvider,
+    timing: BroadcastTiming,
+) -> Router {
     let stores = vec![
         SignerStore::open(dir0).unwrap(),
         SignerStore::open(dir1).unwrap(),
     ];
     let backend = InProcessBackend::new(stores, 2);
     let active = backend.recover_active().unwrap();
+    let mut state = AppState::new(provider, backend, active);
+    state.broadcast = timing;
+    build_router(state)
+}
+
+fn test_router(dir0: &std::path::Path, dir1: &std::path::Path) -> Router {
     let provider = sovra_eth::http_provider("http://127.0.0.1:9")
         .unwrap()
         .erased();
-    build_router(AppState::new(provider, backend, active))
+    router_with(dir0, dir1, provider, BroadcastTiming::default())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -328,4 +346,231 @@ async fn concurrent_signs_one_wins_one_conflicts() {
     let mut statuses = [a.0, b.0];
     statuses.sort();
     assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]); // 200 < 409
+}
+
+// ---------------------------------------------------------------------------
+// /v1/broadcast — driven through alloy's FIFO mock transport (Asserter), so
+// every RPC response is scripted and the two-call poll loop stays
+// deterministic. Timings are shrunk per-test via `BroadcastTiming`.
+
+fn mocked_router(
+    dir0: &std::path::Path,
+    dir1: &std::path::Path,
+    asserter: Asserter,
+    timing: BroadcastTiming,
+) -> Router {
+    let provider = ProviderBuilder::new()
+        .connect_mocked_client(asserter)
+        .erased();
+    router_with(dir0, dir1, provider, timing)
+}
+
+/// dkg + sign on `router`, returning the signed bytes and their tx hash
+/// (keccak of the raw envelope — what the node would echo back).
+async fn provision_and_sign(router: &Router) -> (Bytes, B256) {
+    let (status, _) = call(router, post_json("/v1/dkg", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (raw, _) = unsigned_tx(1_000_000_000u64);
+    let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
+    let (status, body) = call(router, post_json("/v1/sign", req)).await;
+    assert_eq!(status, StatusCode::OK);
+    let signed = Bytes::from_str(json(&body)["signed_transaction"].as_str().unwrap()).unwrap();
+    let tx_hash = keccak256(&signed);
+    (signed, tx_hash)
+}
+
+fn receipt_for(tx_hash: B256, success: bool) -> TransactionReceipt {
+    TransactionReceipt {
+        inner: ReceiptEnvelope::Eip1559(ReceiptWithBloom {
+            receipt: Receipt {
+                status: success.into(),
+                cumulative_gas_used: 21_000,
+                logs: vec![],
+            },
+            logs_bloom: Default::default(),
+        }),
+        transaction_hash: tx_hash,
+        transaction_index: Some(0),
+        block_hash: Some(B256::from([0x22; 32])),
+        block_number: Some(123),
+        gas_used: 21_000,
+        effective_gas_price: 3,
+        blob_gas_used: None,
+        blob_gas_price: None,
+        from: Address::from([0x33; 20]),
+        to: Some(Address::from([0x11; 20])),
+        contract_address: None,
+    }
+}
+
+fn fast_timing() -> BroadcastTiming {
+    BroadcastTiming {
+        timeout: Duration::from_secs(5),
+        poll: Duration::from_millis(1),
+    }
+}
+
+#[tokio::test]
+async fn broadcast_requires_dkg() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let router = test_router(d0.path(), d1.path());
+
+    // The dkg guard runs before any byte is parsed, so the payload is moot.
+    let body = serde_json::json!({ "signed_transaction": "0xdeadbeef" });
+    let (status, _) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_rejects_invalid_bytes() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let router = test_router(d0.path(), d1.path());
+    let (signed, _) = provision_and_sign(&router).await;
+
+    let mut wrong_type = signed.to_vec();
+    wrong_type[0] = 0x01;
+    let mut trailing = signed.to_vec();
+    trailing.push(0x00);
+    let unsigned = unsigned_tx(1_000_000_000u64).0; // no signature list
+
+    for bad in [
+        Bytes::from(wrong_type).to_string(),
+        "0xdeadbeef".to_string(),
+        Bytes::from(trailing).to_string(),
+        unsigned.to_string(),
+    ] {
+        let body = serde_json::json!({ "signed_transaction": bad });
+        let (status, _) = call(&router, post_json("/v1/broadcast", body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "input: {bad}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_rejects_foreign_signer() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (d2, d3) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let router_a = test_router(d0.path(), d1.path());
+    let router_b = test_router(d2.path(), d3.path());
+    let (signed, _) = provision_and_sign(&router_a).await;
+    // router_b has its own (different) active address.
+    let (status, _) = call(&router_b, post_json("/v1/dkg", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router_b, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json(&resp)["error"]
+            .as_str()
+            .unwrap()
+            .contains("active signer")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_confirmed() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let asserter = Asserter::new();
+    let router = mocked_router(d0.path(), d1.path(), asserter.clone(), fast_timing());
+    let (signed, tx_hash) = provision_and_sign(&router).await;
+
+    asserter.push_success(&tx_hash); // eth_sendRawTransaction echoes the hash
+    asserter.push_success(&receipt_for(tx_hash, true)); // first poll hits
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::OK);
+    let resp = json(&resp);
+    assert_eq!(resp["status"], "confirmed");
+    assert_eq!(resp["tx_hash"].as_str().unwrap(), tx_hash.to_string());
+    assert_eq!(resp["block_number"], 123);
+    assert_eq!(resp["gas_used"], 21_000);
+    assert_eq!(resp["execution_success"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_pending_202() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let asserter = Asserter::new();
+    let timing = BroadcastTiming {
+        timeout: Duration::ZERO, // exactly one receipt check, then pending
+        poll: Duration::from_millis(1),
+    };
+    let router = mocked_router(d0.path(), d1.path(), asserter.clone(), timing);
+    let (signed, tx_hash) = provision_and_sign(&router).await;
+
+    asserter.push_success(&tx_hash);
+    asserter.push_success(&serde_json::Value::Null); // no receipt yet
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let resp = json(&resp);
+    assert_eq!(resp["status"], "pending");
+    assert_eq!(resp["tx_hash"].as_str().unwrap(), tx_hash.to_string());
+    assert!(resp.get("block_number").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_node_rejection_maps_400() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let asserter = Asserter::new();
+    let router = mocked_router(d0.path(), d1.path(), asserter.clone(), fast_timing());
+    let (signed, _) = provision_and_sign(&router).await;
+
+    asserter.push_failure_msg("nonce too low");
+    asserter.push_success(&serde_json::Value::Null); // recheck: never mined
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        json(&resp)["error"]
+            .as_str()
+            .unwrap()
+            .contains("nonce too low")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_rejection_after_mined_is_confirmed() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let asserter = Asserter::new();
+    let router = mocked_router(d0.path(), d1.path(), asserter.clone(), fast_timing());
+    let (signed, tx_hash) = provision_and_sign(&router).await;
+
+    asserter.push_failure_msg("already known"); // idempotent re-broadcast
+    asserter.push_success(&receipt_for(tx_hash, true)); // …because it mined
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&resp)["status"], "confirmed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_rpc_unreachable_502() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let router = test_router(d0.path(), d1.path()); // dead RPC URL
+    let (signed, _) = provision_and_sign(&router).await;
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(json(&resp)["error"], "rpc broadcast failed"); // no leak
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broadcast_wrong_node_hash_500() {
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let asserter = Asserter::new();
+    let router = mocked_router(d0.path(), d1.path(), asserter.clone(), fast_timing());
+    let (signed, _) = provision_and_sign(&router).await;
+
+    asserter.push_success(&B256::from([0xee; 32])); // node lies about the hash
+
+    let body = serde_json::json!({ "signed_transaction": signed.to_string() });
+    let (status, resp) = call(&router, post_json("/v1/broadcast", body)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json(&resp)["error"], "broadcast verification failed");
 }

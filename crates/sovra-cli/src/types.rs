@@ -45,4 +45,9 @@ pub enum Command {
         #[arg(long)]
         tx: Bytes,
     },
+    /// Broadcast a signed transaction (0x02-prefixed hex, as returned by sign).
+    Broadcast {
+        #[arg(long)]
+        tx: Bytes,
+    },
 }

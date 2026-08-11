@@ -133,15 +133,28 @@ cargo run -p sovra-cli -- prepare \
 # Sign it — the selected pair of cosigners runs the DKLs23 rounds P2P
 cargo run -p sovra-cli -- sign --tx 0x02...
 # → { "signed_transaction": "0x02..", "signature": { r, s, y_parity }, ... }
+
+# Broadcast it — submits to Sepolia via the RPC node, waits up to 30 s for a receipt
+cargo run -p sovra-cli -- broadcast --tx 0x02...
+# → 200 { "tx_hash": "0x..", "status": "confirmed", "block_number": .., "gas_used": .., "execution_success": true }
+# → 202 { "tx_hash": "0x..", "status": "pending" }   # accepted, unmined — check Etherscan by tx_hash
 ```
 
-The CLI prints only the response JSON on stdout, so prepare pipes straight into
-sign:
+A `202` is a success exit for the CLI: the node took the transaction, it just
+hadn't mined within the window. A node-level rejection (nonce too low,
+insufficient funds) is a `400` with the node's reason; an unreachable RPC node
+is a `502`. Re-broadcasting an already-mined transaction returns `200` with its
+receipt.
+
+The CLI prints only the response JSON on stdout, so the whole lifecycle pipes
+end-to-end:
 
 ```bash
 cargo run -p sovra-cli -- prepare --to 0x000000000000000000000000000000000000dEaD --value 0 \
   | jq -r .unsigned_transaction \
-  | xargs -I{} cargo run -p sovra-cli -- sign --tx {}
+  | xargs -I{} cargo run -p sovra-cli -- sign --tx {} \
+  | jq -r .signed_transaction \
+  | xargs -I{} cargo run -p sovra-cli -- broadcast --tx {}
 ```
 
 Optional calldata goes through `--data` (defaults to `0x`) — note the sample
@@ -156,8 +169,7 @@ cargo run -p sovra-cli -- prepare --to 0x... --value 0 --data 0xdeadbeef
 node rejects a spend the address can't cover. The symptom is a
 `502 { "error": "rpc enrichment failed" }` from `prepare`; the underlying
 `insufficient funds` reason is in the orchestrator's log. Fund the DKG address from
-any Sepolia faucet, then non-zero values (and `POST /v1/broadcast`, not yet in the
-CLI) work.
+any Sepolia faucet, then non-zero values work end-to-end through `broadcast`.
 
 ### Signing policy (per cosigner)
 

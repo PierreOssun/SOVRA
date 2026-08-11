@@ -87,6 +87,7 @@ pub fn build_router<B: MpcBackend + Send + Sync + 'static>(state: AppState<B>) -
         .route("/v1/recover", post(api::recover))
         .route("/v1/prepare", post(api::prepare))
         .route("/v1/sign", post(api::sign))
+        .route("/v1/broadcast", post(api::broadcast))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(correlation))
         .with_state(state)

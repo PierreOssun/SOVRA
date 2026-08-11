@@ -9,7 +9,7 @@
 //! through the `Arc`). Everything here is in-memory and rebuilt at startup.
 //! Pattern: shared-state cell (Arc + interior mutability), standard axum.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
@@ -17,10 +17,30 @@ use sovra_mpc::MpcBackend;
 
 use crate::api::SignResponse;
 
+/// How long `/v1/broadcast` waits for a receipt and how often it polls.
+/// A field (not constants) so tests can shrink the window to milliseconds.
+#[derive(Debug, Clone, Copy)]
+pub struct BroadcastTiming {
+    pub timeout: Duration,
+    pub poll: Duration,
+}
+
+impl Default for BroadcastTiming {
+    /// 30 s window, 2 s poll — Sepolia mines every ~12 s, so ~15 checks
+    /// cover two block opportunities.
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            poll: Duration::from_secs(2),
+        }
+    }
+}
+
 pub struct AppState<B> {
     pub provider: DynProvider,
     pub backend: Arc<B>,
     pub signer: Arc<SignerCell>,
+    pub broadcast: BroadcastTiming,
 }
 
 impl<B> Clone for AppState<B> {
@@ -29,6 +49,7 @@ impl<B> Clone for AppState<B> {
             provider: self.provider.clone(),
             backend: self.backend.clone(),
             signer: self.signer.clone(),
+            broadcast: self.broadcast,
         }
     }
 }
@@ -45,6 +66,7 @@ impl<B: MpcBackend> AppState<B> {
                 }),
                 op: tokio::sync::Mutex::new(()),
             }),
+            broadcast: BroadcastTiming::default(),
         }
     }
 }

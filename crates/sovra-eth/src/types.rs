@@ -121,4 +121,33 @@ pub enum DecodeError {
     Rlp(#[from] alloy_rlp::Error),
     #[error("trailing bytes after transaction")]
     TrailingBytes,
+    #[error("could not recover signer from signed transaction")]
+    Recovery,
+}
+
+/// The two non-error endings of a broadcast: mined within the wait window,
+/// or accepted by the node but still pending when the window closed.
+#[cfg(feature = "rpc")]
+#[derive(Debug)]
+pub enum BroadcastOutcome {
+    /// Boxed: a receipt is ~576 bytes vs the empty pending variant.
+    Confirmed(Box<alloy_rpc_types_eth::TransactionReceipt>),
+    /// Accepted by the node, unmined when the wait window closed. Carries no
+    /// hash — the caller computed it and passed it in.
+    Pending,
+}
+
+#[cfg(feature = "rpc")]
+#[derive(Error, Debug)]
+pub enum BroadcastError {
+    /// The node refused the transaction and no receipt exists for it —
+    /// the message is the node's own reason (nonce too low, underpriced…).
+    #[error("node rejected transaction: {0}")]
+    Rejected(String),
+    #[error("rpc call failed: {0}")]
+    Rpc(#[from] TransportError),
+    /// The node's echoed hash disagrees with the locally computed one —
+    /// a broken invariant, never a caller mistake.
+    #[error("node returned tx hash {node}, locally computed {local}")]
+    HashMismatch { local: B256, node: B256 },
 }

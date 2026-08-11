@@ -1,14 +1,17 @@
 //! Operator CLI mirroring the `sovra-api` orchestrator endpoints (M3).
 //!
-//! One subcommand per endpoint — `dkg`, `prepare`, `sign` — each a thin HTTP
-//! call that pretty-prints the JSON response. It holds no key material and no
-//! state: all crypto and persistence happen server-side; this exists so the
-//! whole vertical slice (provision once, sign later) can be driven end-to-end
-//! from a shell without hand-writing curl bodies.
+//! One subcommand per endpoint — `dkg`, `prepare`, `sign`, `broadcast` —
+//! each a thin HTTP call that pretty-prints the JSON response. It holds no
+//! key material and no state: all crypto and persistence happen server-side;
+//! this exists so the whole vertical slice (provision once, sign later,
+//! broadcast last) can be driven end-to-end from a shell without
+//! hand-writing curl bodies.
 //!
 //! Composable by design: stdout carries only the response JSON (errors go to
 //! stderr, non-2xx exits 1), so `prepare | jq -r .unsigned_transaction` feeds
-//! straight into `sign --tx`.
+//! straight into `sign --tx`, and `sign | jq -r .signed_transaction` into
+//! `broadcast --tx`. A 202 (submitted, unmined) is a success exit — pending
+//! is not a failure.
 
 mod types;
 
@@ -29,8 +32,9 @@ async fn main() -> std::process::ExitCode {
             Some(json!({ "to": to, "value": value, "data": data })),
         ),
         Command::Sign { tx } => ("/v1/sign", Some(json!({ "unsigned_transaction": tx }))),
+        Command::Broadcast { tx } => ("/v1/broadcast", Some(json!({ "signed_transaction": tx }))),
     };
-    // all three are POST, so Method can drop out entirely
+    // all four are POST, so Method can drop out entirely
 
     let base = cli.api_url.trim_end_matches('/');
     let mut req = Client::new().post(format!("{base}{path}"));

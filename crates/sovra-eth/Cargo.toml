@@ -14,6 +14,7 @@ rpc = [
   "dep:alloy-rpc-types-eth",
   "dep:alloy-transport",
   "dep:url",
+  "dep:tokio",
 ]
 
 [dependencies]
@@ -26,6 +27,7 @@ alloy-rpc-types-eth = { workspace = true, optional = true }
 thiserror = { workspace = true }
 alloy-rlp = { workspace = true }
 url = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

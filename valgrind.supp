@@ -1,0 +1,16 @@
+# Known-benign "possibly lost" reports from program-lifetime lazy_static caches
+# in the x509-parser dependency chain. hashbrown stores an interior pointer into
+# its allocation, so valgrind cannot see the root held by the static and
+# classifies the block as "possibly lost" instead of "still reachable".
+{
+   x509-parser-extension-parsers-lazy-static
+   Memcheck:Leak
+   ...
+   fun:*EXTENSION_PARSERS*
+}
+{
+   oid-registry-lazy-static
+   Memcheck:Leak
+   ...
+   fun:*OID_REGISTRY*
+}

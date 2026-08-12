@@ -8,12 +8,13 @@
 //! 4xx, cosigner/RPC failures → 502, broken invariants (cross-check,
 //! finalize, storage) → 500. Pattern: error facade at the HTTP boundary.
 
+use alloy_primitives::Address;
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use sovra_eth::{DecodeError, FinalizeError, PrepareError};
+use sovra_eth::{BroadcastError, DecodeError, FinalizeError, PrepareError};
 use sovra_mpc::MpcError;
 use sovra_state::StateError;
 use thiserror::Error;
@@ -46,6 +47,12 @@ pub enum ApiError {
 
     #[error(transparent)]
     Finalize(#[from] FinalizeError),
+
+    #[error(transparent)]
+    Broadcast(#[from] BroadcastError),
+
+    #[error("signed transaction recovers to {recovered}, active signer is {active}")]
+    BroadcastSignerMismatch { recovered: Address, active: Address },
 }
 
 impl IntoResponse for ApiError {
@@ -82,6 +89,20 @@ impl IntoResponse for ApiError {
             ApiError::Finalize(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "signature verification failed".to_string(),
+            ),
+
+            // The node's rejection reason is about the caller's tx ("nonce
+            // too low", "insufficient funds") — actionable, not an internal.
+            ApiError::Broadcast(BroadcastError::Rejected(_))
+            | ApiError::BroadcastSignerMismatch { .. } => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            ApiError::Broadcast(BroadcastError::Rpc(_)) => {
+                (StatusCode::BAD_GATEWAY, "rpc broadcast failed".to_string())
+            }
+            ApiError::Broadcast(BroadcastError::HashMismatch { .. }) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "broadcast verification failed".to_string(),
             ),
         };
 

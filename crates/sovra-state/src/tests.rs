@@ -127,3 +127,62 @@ fn sealer_is_applied() {
     assert_ne!(raw, sh.as_bytes());
     assert_eq!(raw, b"fedcba"); // reversed
 }
+
+#[test]
+fn xchacha_sealer_round_trips_and_hides_plaintext() {
+    use crate::types::XChaChaSealer;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = SignerStore::open_with_sealer(tmp.path(), Box::new(XChaChaSealer::new(&[7u8; 32])))
+        .unwrap();
+    let meta = signer("signer-1", 0x11);
+    let sh = shard(b"party-2-share-bytes");
+
+    store.save_shard(&meta, &sh).unwrap();
+    assert_eq!(store.load_shard(&meta.signer_id).unwrap(), sh);
+
+    let raw = std::fs::read(tmp.path().join("signer-1").join(SHARD_FILE)).unwrap();
+    assert!(raw.starts_with(b"SVR1"));
+    assert!(
+        !raw.windows(sh.as_bytes().len()).any(|w| w == sh.as_bytes()),
+        "shard plaintext must not appear in the sealed file"
+    );
+}
+
+#[test]
+fn xchacha_sealer_fails_closed() {
+    use crate::types::XChaChaSealer;
+    let tmp = tempfile::tempdir().unwrap();
+    let meta = signer("signer-1", 0x11);
+    let sh = shard(b"secret-share");
+
+    // Written sealed, then attacked three ways — every open must error.
+    let store = SignerStore::open_with_sealer(tmp.path(), Box::new(XChaChaSealer::new(&[7u8; 32])))
+        .unwrap();
+    store.save_shard(&meta, &sh).unwrap();
+    let shard_path = tmp.path().join("signer-1").join(SHARD_FILE);
+
+    // 1. Wrong key.
+    let wrong = SignerStore::open_with_sealer(tmp.path(), Box::new(XChaChaSealer::new(&[8u8; 32])))
+        .unwrap();
+    assert!(matches!(
+        wrong.load_shard(&meta.signer_id),
+        Err(StateError::Seal)
+    ));
+
+    // 2. Tampered ciphertext (AEAD tag must catch it).
+    let mut raw = std::fs::read(&shard_path).unwrap();
+    *raw.last_mut().unwrap() ^= 1;
+    std::fs::write(&shard_path, &raw).unwrap();
+    assert!(matches!(
+        store.load_shard(&meta.signer_id),
+        Err(StateError::Seal)
+    ));
+
+    // 3. A pre-sealing plaintext shard: no magic -> hard error, never a
+    //    silent plaintext fallback.
+    std::fs::write(&shard_path, sh.as_bytes()).unwrap();
+    assert!(matches!(
+        store.load_shard(&meta.signer_id),
+        Err(StateError::Seal)
+    ));
+}

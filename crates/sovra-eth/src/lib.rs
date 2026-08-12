@@ -22,14 +22,23 @@ pub mod prepare;
 
 mod finalize;
 
+#[cfg(feature = "rpc")]
+mod broadcast;
 mod encoding;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "rpc")]
+use std::time::Duration;
+
+#[cfg(feature = "rpc")]
+use alloy_primitives::B256;
 use alloy_primitives::{Address, U256};
 #[cfg(feature = "rpc")]
 use alloy_provider::Provider;
-pub use encoding::{decode_unsigned, encode_unsigned};
+#[cfg(feature = "rpc")]
+pub use broadcast::broadcast_via_rpc_impl;
+pub use encoding::{decode_signed, decode_unsigned, encode_unsigned};
 pub use prepare::prepare;
 #[cfg(feature = "rpc")]
 pub use prepare::{http_provider, prepare_from_rpc_impl};
@@ -44,6 +53,17 @@ pub async fn prepare_from_rpc<P: Provider>(
     provider: &P,
 ) -> Result<PreparedTx, PrepareError> {
     prepare_from_rpc_impl(req, from, provider).await
+}
+
+#[cfg(feature = "rpc")]
+pub async fn broadcast_via_rpc<P: Provider>(
+    raw: &[u8],
+    expected_hash: B256,
+    provider: &P,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<BroadcastOutcome, BroadcastError> {
+    broadcast_via_rpc_impl(raw, expected_hash, provider, timeout, poll).await
 }
 
 pub fn finalize(

@@ -1,5 +1,6 @@
-//! HTTP handlers for the public API (`/v1/dkg`, `/v1/prepare`, `/v1/sign`),
-//! their request/response DTOs, and the OpenAPI doc ([`ApiDoc`]).
+//! HTTP handlers for the public API (`/v1/dkg`, `/v1/prepare`, `/v1/sign`,
+//! `/v1/broadcast`), their request/response DTOs, and the OpenAPI doc
+//! ([`ApiDoc`]).
 //!
 //! Why generic over `B: MpcBackend`: handlers never name a concrete backend,
 //! so integration tests drive the same code with the in-process backend while
@@ -14,11 +15,11 @@
 //! separate from domain types.
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use sovra_eth::{
-    PreparedTx, TxRequest, decode_unsigned, encode_unsigned, finalize, prepare::validate_unsigned,
-    prepare_from_rpc,
+    BroadcastOutcome, PreparedTx, TxRequest, broadcast_via_rpc, decode_signed, decode_unsigned,
+    encode_unsigned, finalize, prepare::validate_unsigned, prepare_from_rpc,
 };
 use sovra_mpc::MpcBackend;
 use utoipa::{OpenApi, ToSchema};
@@ -74,6 +75,41 @@ pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
     state.signer.state.write().unwrap().active = Some(address);
 
     tracing::info!(%address, "dkg complete");
+    Ok(Json(DkgResponse { address }))
+}
+
+/// Operator endpoint: the recovery re-share ceremony. All n cosigners
+/// (including the normally-cold recovery party) must be online; the
+/// declared-lost party rebuilds its shard from scratch, every other shard
+/// re-randomizes, and the address must come back unchanged — a different
+/// one is a broken invariant, not a result.
+#[utoipa::path(post, path = "/v1/recover", request_body = RecoverRequest)]
+pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
+    Json(body): Json<RecoverRequest>,
+) -> Result<Json<DkgResponse>, ApiError> {
+    let _op = state
+        .signer
+        .op
+        .try_lock()
+        .map_err(|_| ApiError::SigningInProgress)?;
+
+    let active = state
+        .signer
+        .state
+        .read()
+        .unwrap()
+        .active
+        .ok_or(ApiError::DkgNotInitialized)?;
+
+    let address = state.backend.refresh(body.lost_party).await?;
+    if address != active {
+        return Err(ApiError::Mpc(sovra_mpc::MpcError::PartyMismatch(format!(
+            "refresh returned {address}, active generation is {active}"
+        ))));
+    }
+
+    tracing::info!(%address, lost_party = body.lost_party, "recovery re-share complete");
     Ok(Json(DkgResponse { address }))
 }
 
@@ -188,6 +224,81 @@ pub struct SignResponse {
     pub tx_digest: B256,
 }
 
+/// Submit a signed transaction to the chain and wait (bounded) for its
+/// receipt: 200 = mined within the window, 202 = accepted by the node but
+/// still pending when the window closed (verify by tx_hash on Etherscan).
+///
+/// Deliberately does NOT take the `op` lock: that lock encodes MPC
+/// exclusivity, and broadcast is a plain RPC relay — holding it through up
+/// to 30 s of receipt polling would 409 every sign for no custody benefit.
+/// A concurrent double-broadcast is neutralized by the chain itself (node
+/// dedup / nonce rules), and a rejected re-submit of a mined tx comes back
+/// as 200 via the receipt recheck in `broadcast_via_rpc`.
+#[utoipa::path(post, path = "/v1/broadcast", request_body = BroadcastRequest)]
+pub async fn broadcast<B: MpcBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
+    Json(body): Json<BroadcastRequest>,
+) -> Result<(StatusCode, Json<BroadcastResponse>), ApiError> {
+    // Cheap in-memory guard first: nothing works before DKG, regardless of
+    // payload (same 409 semantics as prepare), and no caller bytes are
+    // parsed before it passes.
+    let active = state
+        .signer
+        .state
+        .read()
+        .unwrap()
+        .active
+        .ok_or(ApiError::DkgNotInitialized)?;
+
+    // Decode + recover the signer from the bytes themselves — the caller's
+    // word is never taken for the hash or the sender, and the orchestrator
+    // only relays transactions produced by its own signer (not an open relay).
+    let decoded = decode_signed(&body.signed_transaction)?;
+    if decoded.from != active {
+        return Err(ApiError::BroadcastSignerMismatch {
+            recovered: decoded.from,
+            active,
+        });
+    }
+
+    tracing::info!(tx_hash = %decoded.tx_hash, from = %decoded.from, "broadcast request");
+
+    let outcome = broadcast_via_rpc(
+        &decoded.raw,
+        decoded.tx_hash,
+        &state.provider,
+        state.broadcast.timeout,
+        state.broadcast.poll,
+    )
+    .await?;
+
+    let (status, response) = match outcome {
+        BroadcastOutcome::Confirmed(receipt) => (
+            StatusCode::OK,
+            BroadcastResponse {
+                tx_hash: decoded.tx_hash,
+                status: BroadcastStatus::Confirmed,
+                block_number: receipt.block_number,
+                gas_used: Some(receipt.gas_used),
+                execution_success: Some(receipt.status()),
+            },
+        ),
+        BroadcastOutcome::Pending => (
+            StatusCode::ACCEPTED,
+            BroadcastResponse {
+                tx_hash: decoded.tx_hash,
+                status: BroadcastStatus::Pending,
+                block_number: None,
+                gas_used: None,
+                execution_success: None,
+            },
+        ),
+    };
+
+    tracing::info!(tx_hash = %response.tx_hash, status = ?response.status, "broadcast done");
+    Ok((status, Json(response)))
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct DkgResponse {
     #[schema(value_type = String)]
@@ -200,13 +311,54 @@ pub struct SignRequest {
     unsigned_transaction: Bytes,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct BroadcastRequest {
+    /// 0x02-prefixed signed EIP-2718 bytes, as returned by `/v1/sign`.
+    #[schema(value_type = String)]
+    signed_transaction: Bytes,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastStatus {
+    Confirmed,
+    Pending,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BroadcastResponse {
+    #[schema(value_type = String)]
+    pub tx_hash: B256,
+    pub status: BroadcastStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gas_used: Option<u64>,
+    /// `receipt.status()`: false = mined but reverted. A revert is
+    /// chain-level execution, not a broadcast failure — still 200.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_success: Option<bool>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct RecoverRequest {
+    /// Global id of the party whose shard is being rebuilt. Its store must
+    /// be empty (a rebuilt host), and its new identity must already be in
+    /// every party's pinned roster.
+    pub lost_party: u8,
+}
+
 #[derive(OpenApi)]
 #[openapi(
-    paths(dkg_create, dkg_get, prepare, sign),
+    paths(dkg_create, dkg_get, prepare, sign, broadcast, recover),
     components(schemas(
+        BroadcastRequest,
+        BroadcastResponse,
+        BroadcastStatus,
         DkgResponse,
         PrepareRequest,
         PrepareResponse,
+        RecoverRequest,
         SignRequest,
         SignatureParts,
         SignResponse

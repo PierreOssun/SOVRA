@@ -37,6 +37,53 @@ still succeeds, now via {0, 2} (the orchestrator log shows
 liveness *before* any request; a policy veto from a selected party is final
 and never triggers failover to the cold party.
 
+### Recovery runbook (lost shard → re-share ceremony)
+
+When a party's host is lost (disk, theft, fire), the failover above is the
+**bridge**: the survivor + cold party keep signing. Real recovery is the
+re-share ceremony — it rebuilds the lost shard **at the same address** and
+re-randomizes every other shard, so the lost/stolen one becomes useless.
+Treat a lost shard as compromised: run the ceremony promptly.
+
+1. **Rebuild the host.** Start the cosigner with an empty `data_dir`; it
+   generates a fresh identity and logs its new verifying key (also served on
+   `GET /identity`). It will 409 dkg/sign until step 2 — that's expected.
+2. **Update the roster everywhere.** Put the new verifying key into
+   `participants` (same slot) in *every* cosigner's config — or the
+   `SOVRA_COSIGNER_PARTICIPANTS` env — and restart all cosigners, including
+   the cold one (the ceremony, like DKG, needs **all n online**).
+3. **Run the ceremony.** The orchestrator may be restarted at any point —
+   startup tolerates the rebuilt party's empty store ("awaiting recovery").
+   Then:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:3000/v1/recover \
+     -H 'content-type: application/json' -d '{ "lost_party": 1 }'
+   # → { "address": "0x…" }   ← MUST equal the existing signer address
+   ```
+
+4. **Verify and stand down.** Sign something (`sovra-cli sign`), confirm the
+   address, then stop the cold party again. Old backups of any shard are now
+   dead — the ceremony invalidated the entire previous generation.
+
+Notes: the declared-lost party must have an **empty** store (a present shard
+409s — delete it first: declaring the wrong party lost is refused, not
+absorbed). To rotate shards without a loss event, wipe one party's store
+deliberately and run the same ceremony; a rotation where every party keeps
+its slot needs `quorum_change` tooling (future milestone).
+
+### Shard sealing at rest (`seal_key_path`)
+
+Optional per cosigner: point `seal_key_path` at a file containing 64 hex
+chars (`openssl rand -hex 32 > certs/seal2.key`) and the party's `shard.bin`
+is XChaCha20-Poly1305-sealed on disk — recommended for any shard that leaves
+your desk (the cloud party, the Pi). Fail-closed on a bad key file, and a
+sealed store never falls back to plaintext. Enable it **before** the first
+DKG; to enable it on an existing plaintext shard, wipe that party's store
+and run the recovery ceremony above (the re-share writes the new shard
+sealed). The key file is the at-rest boundary: keep it OUT of the same
+backup as the shard, or the seal adds nothing.
+
 ### TLS material (`certs/`)
 
 Every internal socket (cosigner control APIs :4100/:4101, relay hub :3100) is
@@ -86,15 +133,28 @@ cargo run -p sovra-cli -- prepare \
 # Sign it — the selected pair of cosigners runs the DKLs23 rounds P2P
 cargo run -p sovra-cli -- sign --tx 0x02...
 # → { "signed_transaction": "0x02..", "signature": { r, s, y_parity }, ... }
+
+# Broadcast it — submits to Sepolia via the RPC node, waits up to 30 s for a receipt
+cargo run -p sovra-cli -- broadcast --tx 0x02...
+# → 200 { "tx_hash": "0x..", "status": "confirmed", "block_number": .., "gas_used": .., "execution_success": true }
+# → 202 { "tx_hash": "0x..", "status": "pending" }   # accepted, unmined — check Etherscan by tx_hash
 ```
 
-The CLI prints only the response JSON on stdout, so prepare pipes straight into
-sign:
+A `202` is a success exit for the CLI: the node took the transaction, it just
+hadn't mined within the window. A node-level rejection (nonce too low,
+insufficient funds) is a `400` with the node's reason; an unreachable RPC node
+is a `502`. Re-broadcasting an already-mined transaction returns `200` with its
+receipt.
+
+The CLI prints only the response JSON on stdout, so the whole lifecycle pipes
+end-to-end:
 
 ```bash
 cargo run -p sovra-cli -- prepare --to 0x000000000000000000000000000000000000dEaD --value 0 \
   | jq -r .unsigned_transaction \
-  | xargs -I{} cargo run -p sovra-cli -- sign --tx {}
+  | xargs -I{} cargo run -p sovra-cli -- sign --tx {} \
+  | jq -r .signed_transaction \
+  | xargs -I{} cargo run -p sovra-cli -- broadcast --tx {}
 ```
 
 Optional calldata goes through `--data` (defaults to `0x`) — note the sample
@@ -109,8 +169,7 @@ cargo run -p sovra-cli -- prepare --to 0x... --value 0 --data 0xdeadbeef
 node rejects a spend the address can't cover. The symptom is a
 `502 { "error": "rpc enrichment failed" }` from `prepare`; the underlying
 `insufficient funds` reason is in the orchestrator's log. Fund the DKG address from
-any Sepolia faucet, then non-zero values (and `POST /v1/broadcast`, not yet in the
-CLI) work.
+any Sepolia faucet, then non-zero values work end-to-end through `broadcast`.
 
 ### Signing policy (per cosigner)
 

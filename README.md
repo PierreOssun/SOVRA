@@ -69,6 +69,10 @@ Response: `{ signed_transaction, signature: { r, s, y_parity }, recovered_addres
 ### `POST /v1/broadcast`
 
 Submit the signed transaction to Sepolia and wait up to 30 seconds for a receipt.
+Request: `{ signed_transaction }` — the `0x02…`-prefixed bytes from `sign`. The
+signer is recovered from the bytes and must match the active DKG address.
+
+Response: `200 { tx_hash, status: "confirmed", block_number, gas_used, execution_success }`
 
 ---
 
@@ -91,7 +95,7 @@ These are deliberate deferrals, not gaps:
 - Observability backend (local JSON logs only)
 - Multi-chain support (Sepolia only)
 - Automated backup and restore (manual archive only)
-- The recovery re-share ceremony (`key_refresh` — rebuild a lost shard, same address) and sealing the cloud shard at rest: M10
+- Plain shard rotation without loss and quorum changes (`quorum_change`) — recovery of a lost shard IS supported (`POST /v1/recover`, see RUN.md)
 
 /!\ This repo is for demo purposes only.     
 

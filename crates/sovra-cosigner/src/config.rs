@@ -36,6 +36,11 @@ pub struct Config {
     pub tls_ca_path: String,
     pub tls_cert_path: String,
     pub tls_key_path: String,
+    /// Optional shard-sealing key (64 hex chars = 32 bytes, e.g. from
+    /// `openssl rand -hex 32`). Set → shard.bin is XChaCha20-Poly1305 sealed
+    /// at rest; unset → plaintext (filesystem modes only). Fail-closed: a
+    /// configured path that can't be read or parsed aborts startup.
+    pub seal_key_path: Option<String>,
     #[serde(default = "default_relay_url")]
     pub relay_url: String,
     #[serde(default = "default_ttl_secs")]

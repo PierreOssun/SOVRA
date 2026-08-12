@@ -423,6 +423,165 @@ async fn split_flow_2of3() {
     assert!(matches!(err, RecoverError::Transport { .. }));
 }
 
+/// M10 gate: full-stack recovery re-share with a cold, SEALED cloud shard.
+/// One narrative flow: dkg-3 (cosigner2's store is XChaCha-sealed) → sign →
+/// party 1's host is destroyed → rebuilt with a NEW identity → rosters
+/// updated everywhere (config + restart, played by respawning) → startup
+/// recovery tolerates the empty rebuilt store → POST /v1/recover rebuilds
+/// the shard at the SAME address → the new generation signs.
+#[tokio::test(flavor = "multi_thread")]
+async fn recover_flow_2of3() {
+    let dir = tempfile::tempdir().unwrap();
+    let tls = test_tls(3);
+    let relay_url = start_hub(tls.orchestrator.clone()).await;
+    let (mut sks, mut roster) = keys(3);
+    let seal_key = [9u8; 32];
+
+    // cosigner2 = the cloud party: same state shape, sealed store.
+    let sealed_state = |sk: &SigningKey, roster: &[VerifyingKey]| {
+        Arc::new(CosignerState {
+            party_id: 2,
+            signing_key: sk.clone(),
+            roster: Some(roster.to_vec()),
+            threshold: 2,
+            store: SignerStore::open_with_sealer(
+                dir.path().join("party2"),
+                Box::new(sovra_state::XChaChaSealer::new(&seal_key)),
+            )
+            .unwrap(),
+            relay_url: relay_url.clone(),
+            relay_tls: tls.cosigners[2].ws_client_config().unwrap(),
+            ttl: Duration::from_secs(10),
+            op: tokio::sync::Mutex::new(()),
+            policy: permissive_policy(),
+        })
+    };
+
+    let (url0, h0) = spawn_cosigner(
+        cosigner_state(
+            0,
+            &roster,
+            &sks[0],
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[0],
+        ),
+        tls.cosigners[0].clone(),
+    )
+    .await;
+    let (url1, h1) = spawn_cosigner(
+        cosigner_state(
+            1,
+            &roster,
+            &sks[1],
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[1],
+        ),
+        tls.cosigners[1].clone(),
+    )
+    .await;
+    let (url2, h2) = spawn_cosigner(sealed_state(&sks[2], &roster), tls.cosigners[2].clone()).await;
+    let urls = vec![(0u8, url0), (1u8, url1), (2u8, url2)];
+
+    // 1. dkg + a first signature, and the cloud shard really is sealed.
+    let router = api_router(&urls, None, &tls.orchestrator);
+    let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
+    let (raw1, _) = unsigned_tx(1_000_000_000);
+    let req1 = serde_json::json!({ "unsigned_transaction": raw1.to_string() });
+    let (status, _) = call(&router, post_json("/v1/sign", req1)).await;
+    assert_eq!(status, StatusCode::OK);
+    let sealed_shard = std::fs::read(dir.path().join("party2").join("default/shard.bin")).unwrap();
+    assert!(
+        sealed_shard.starts_with(b"SVR1"),
+        "cloud shard must be sealed at rest"
+    );
+
+    // 2. Disaster: party 1's host is gone — process dead, disk wiped.
+    h1.abort();
+    let _ = h1.await;
+    std::fs::remove_dir_all(dir.path().join("party1")).unwrap();
+
+    // 3. Rebuild: fresh identity key; every party's pinned roster is updated
+    //    (config + restart in production — played here by respawning all
+    //    three over their surviving stores).
+    sks[1] = SigningKey::generate(&mut rand::rngs::OsRng);
+    roster[1] = sks[1].verifying_key();
+    for h in [h0, h2] {
+        h.abort();
+        let _ = h.await;
+    }
+    let (url0b, _h0b) = spawn_cosigner(
+        cosigner_state(
+            0,
+            &roster,
+            &sks[0],
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[0],
+        ),
+        tls.cosigners[0].clone(),
+    )
+    .await;
+    let (url1b, _h1b) = spawn_cosigner(
+        cosigner_state(
+            1,
+            &roster,
+            &sks[1],
+            dir.path(),
+            &relay_url,
+            &tls.cosigners[1],
+        ),
+        tls.cosigners[1].clone(),
+    )
+    .await;
+    let (url2b, _h2b) =
+        spawn_cosigner(sealed_state(&sks[2], &roster), tls.cosigners[2].clone()).await;
+    let urls_b = vec![(0u8, url0b), (1u8, url1b), (2u8, url2b)];
+
+    // 4. Orchestrator restart mid-incident: the empty rebuilt store is
+    //    "awaiting recovery", not a torn DKG — startup must succeed on the
+    //    surviving t-quorum.
+    let probe = tls
+        .orchestrator
+        .http_client(Duration::from_secs(5))
+        .unwrap();
+    let active = orchestrator::recover_active(&probe, &urls_b, 2)
+        .await
+        .unwrap();
+    assert_eq!(active, Some(address));
+
+    // 5. The ceremony: same address comes back, and the recovered generation
+    //    signs through the full stack.
+    let router2 = api_router(&urls_b, active, &tls.orchestrator);
+    let (status, body) = call(
+        &router2,
+        post_json("/v1/recover", serde_json::json!({ "lost_party": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap(),
+        address
+    );
+
+    let (raw2, _) = unsigned_tx(2_000_000_000);
+    let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
+    let (status, body) = call(&router2, post_json("/v1/sign", req2)).await;
+    assert_eq!(status, StatusCode::OK);
+    let signed = Bytes::from_str(json(&body)["signed_transaction"].as_str().unwrap()).unwrap();
+    let envelope = TxEnvelope::decode_2718(&mut signed.as_ref()).unwrap();
+    assert_eq!(envelope.recover_signer().unwrap(), address);
+
+    // 6. The refresh actually replaced the sealed cloud shard (still sealed,
+    //    different ciphertext).
+    let resealed = std::fs::read(dir.path().join("party2").join("default/shard.bin")).unwrap();
+    assert!(resealed.starts_with(b"SVR1"));
+    assert_ne!(resealed, sealed_shard, "cloud shard must have been rotated");
+}
+
 /// M8 gate: a client that trusts the CA but presents **no identity** is
 /// refused at the TLS handshake — a transport error, never an HTTP status —
 /// and nothing server-side is touched: the full sign path runs clean right

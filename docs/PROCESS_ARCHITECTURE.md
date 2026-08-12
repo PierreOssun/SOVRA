@@ -65,8 +65,12 @@ round messages through the hub *inside* the api process). Both internal
 planes are **mTLS against the project CA** (`certs/`, seeded by `cargo xtask
 certs`); the CLI-facing :3000 is plaintext loopback by decision — the custody
 boundary is the cosigner, not the orchestrator. Beyond the diagrams below,
-cosigners also expose `GET /identity` and `GET /health`, and the api exposes
-`GET /v1/dkg` (returns the active signer address).
+cosigners also expose `GET /identity`, `GET /health`, `GET /roster` (DKG
+pre-flight), `GET /pubkey` and `POST /refresh` (the M10 recovery re-share
+ceremony), and the api exposes `GET /v1/dkg` (active signer address) and
+`POST /v1/recover` (operator-triggered re-share: rebuilds a lost party's
+shard at the same address and invalidates the whole previous generation;
+requires all n online, like DKG).
 
 ```mermaid
 graph LR

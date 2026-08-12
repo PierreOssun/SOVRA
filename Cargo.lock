@@ -4597,6 +4597,8 @@ dependencies = [
  "alloy-consensus",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-transport",
  "axum",
  "config",
  "ed25519-dalek",
@@ -4693,6 +4695,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-transport",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "url",
 ]
@@ -4776,6 +4779,8 @@ name = "sovra-state"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "chacha20poly1305",
+ "rand 0.8.6",
  "serde_json",
  "sovra-types",
  "tempfile",

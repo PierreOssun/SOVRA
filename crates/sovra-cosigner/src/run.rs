@@ -62,7 +62,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
-    let store = SignerStore::open(data_dir.join("store"))?;
+    let store = SignerStore::open_with_sealer(data_dir.join("store"), sealer(&config)?)?;
     let policy = load_policy(&config.policy_path)?;
     tracing::info!(policy_path = %config.policy_path, "signing policy loaded");
     // Fail-closed like the policy: no TLS material, no process. The loader's
@@ -104,12 +104,34 @@ pub fn build_router(state: Arc<CosignerState>) -> Router {
     Router::new()
         .route("/dkg", post(api::dkg))
         .route("/sign", post(api::sign))
+        .route("/refresh", post(api::refresh))
         .route("/signer", get(api::signer))
         .route("/roster", get(api::roster))
+        .route("/pubkey", get(api::pubkey))
         .route("/identity", get(api::identity))
         .route("/health", get(api::health))
         .layer(axum::middleware::from_fn(correlation))
         .with_state(state)
+}
+
+/// Shard sealer from config: no `seal_key_path` → `Passthrough` (plaintext
+/// at rest), a path → XChaCha20-Poly1305 with the 32-byte hex key it names.
+/// Fail-closed like the TLS material: a configured-but-broken key file
+/// refuses startup rather than falling back to plaintext.
+fn sealer(
+    config: &Config,
+) -> Result<Box<dyn sovra_state::ShardSealer>, Box<dyn std::error::Error>> {
+    let Some(path) = &config.seal_key_path else {
+        return Ok(Box::new(sovra_state::Passthrough));
+    };
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("seal key {path}: {e}"))?;
+    let key: [u8; 32] = alloy_primitives::hex::decode(raw.trim())
+        .map_err(|e| format!("seal key {path}: {e}"))?
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("seal key {path}: must be 32 bytes (64 hex chars)"))?;
+    tracing::info!(seal_key = %path, "shard sealing enabled");
+    Ok(Box::new(sovra_state::XChaChaSealer::new(&key)))
 }
 
 /// Fail-closed: any problem reading or parsing the policy file aborts

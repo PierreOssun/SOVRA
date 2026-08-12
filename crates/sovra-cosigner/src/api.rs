@@ -21,9 +21,12 @@ use axum::{Json, extract::State};
 use sovra_eth::{decode_unsigned, prepare::validate_unsigned};
 use sovra_ipc::{
     client::WsRelay,
-    control::{Identity, RosterInfo, SignParts, SignerInfo, StartDkgRequest, StartSignRequest},
+    control::{
+        Identity, PublicKeyInfo, RosterInfo, SignParts, SignerInfo, StartDkgRequest,
+        StartRefreshRequest, StartSignRequest,
+    },
 };
-use sovra_mpc_dkls23_silence::{keygen_party, sign_party};
+use sovra_mpc_dkls23_silence::{compressed_public_key, keygen_party, refresh_party, sign_party};
 use sovra_policy::{TxView, Verdict};
 use sovra_state::StateError;
 use sovra_types::{ACTIVE_SIGNER_ID, SignerId, SignerMetadata};
@@ -42,18 +45,7 @@ pub async fn dkg(
         Err(e) => return Err(e.into()),
     }
     let ctx = state.ctx(req.instance)?;
-    // The request's (n, t) are assertions, not inputs: the keygen setup is
-    // always built from this party's own config; divergence is a 409, so a
-    // misconfigured fleet fails as config instead of an opaque MPC timeout.
-    if req.n_parties as usize != ctx.party_vks.len() || req.threshold != state.threshold {
-        return Err(CosignerError::RosterMismatch(format!(
-            "orchestrator expects {}-of-{}, this party is configured {}-of-{}",
-            req.threshold,
-            req.n_parties,
-            state.threshold,
-            ctx.party_vks.len()
-        )));
-    }
+    assert_scheme(&state, ctx.party_vks.len(), req.n_parties, req.threshold)?;
     // dial per run, 502 on refusal
     let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
     let (share, address) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay))
@@ -141,6 +133,104 @@ pub async fn roster(
     State(state): State<Arc<CosignerState>>,
 ) -> Result<Json<RosterInfo>, CosignerError> {
     Ok(Json(state.roster_info()?))
+}
+
+/// The wallet's compressed public key, derived from this party's shard —
+/// what a recovery ceremony's lost party adopts as its reconstruction
+/// target. Public data (recoverable from any on-chain signature).
+pub async fn pubkey(
+    State(state): State<Arc<CosignerState>>,
+) -> Result<Json<PublicKeyInfo>, CosignerError> {
+    let share = match state.store.load_shard(&SignerId::new(ACTIVE_SIGNER_ID)) {
+        Ok(s) => s,
+        Err(StateError::NotFound(_)) => return Err(CosignerError::NoSigner),
+        Err(e) => return Err(e.into()),
+    };
+    let keyshare = sl_keyshare(&share)?;
+    Ok(Json(PublicKeyInfo {
+        public_key: compressed_public_key(&keyshare).to_vec().into(),
+    }))
+}
+
+/// The (n, t) assertions shared by `/dkg` and `/refresh`: request fields are
+/// never protocol inputs — the ceremony setup is always built from this
+/// party's own config, and divergence is a 409 so a misconfigured fleet
+/// fails as config instead of an opaque MPC timeout.
+fn assert_scheme(
+    state: &CosignerState,
+    n: usize,
+    req_n: u8,
+    req_t: u8,
+) -> Result<(), CosignerError> {
+    if req_n as usize != n || req_t != state.threshold {
+        return Err(CosignerError::RosterMismatch(format!(
+            "orchestrator expects {req_t}-of-{req_n}, this party is configured {}-of-{n}",
+            state.threshold
+        )));
+    }
+    Ok(())
+}
+
+fn sl_keyshare(
+    share: &sovra_types::KeyShare,
+) -> Result<sovra_mpc_dkls23_silence::Keyshare, CosignerError> {
+    sovra_mpc_dkls23_silence::Keyshare::from_bytes(share.as_bytes())
+        .ok_or(CosignerError::Mpc(sovra_mpc::MpcError::Deserialize))
+}
+
+/// Recovery re-share: same shape as `dkg` (op lock → scheme assertions →
+/// dial → run under the ttl), but the shard precondition depends on the
+/// role: the declared-lost party must have NO shard (a present one means
+/// the operator declared the wrong party — 409, delete the store first),
+/// every survivor must have one. `save_shard` overwrites atomically: the
+/// old generation is dead the moment the ceremony completes.
+pub async fn refresh(
+    State(state): State<Arc<CosignerState>>,
+    Json(req): Json<StartRefreshRequest>,
+) -> Result<Json<SignerInfo>, CosignerError> {
+    let _op = state.op.try_lock().map_err(|_| CosignerError::Busy)?;
+    let ctx = state.ctx(req.instance)?;
+    let n = ctx.party_vks.len();
+    assert_scheme(&state, n, req.n_parties, req.threshold)?;
+    if req.lost_party as usize >= n {
+        return Err(CosignerError::RosterMismatch(format!(
+            "lost party {} out of range for n={n}",
+            req.lost_party
+        )));
+    }
+    let public_key: [u8; 33] = req
+        .public_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| CosignerError::Undecodable("public key must be 33 bytes".into()))?;
+
+    let id = SignerId::new(ACTIVE_SIGNER_ID);
+    let old_share = match state.store.load_shard(&id) {
+        Ok(s) => Some(s),
+        Err(StateError::NotFound(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+    match (state.party_id == req.lost_party, &old_share) {
+        (true, Some(_)) => return Err(CosignerError::ShardExists),
+        (false, None) => return Err(CosignerError::NoShard),
+        _ => {}
+    }
+
+    let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
+    let (share, address) = tokio::time::timeout(
+        state.ttl,
+        refresh_party(&ctx, old_share.as_ref(), req.lost_party, &public_key, relay),
+    )
+    .await
+    .map_err(|_| CosignerError::RunTimeout)??;
+    state.store.save_shard(
+        &SignerMetadata {
+            signer_id: id,
+            address,
+        },
+        &share,
+    )?;
+    Ok(Json(SignerInfo { address }))
 }
 
 pub async fn signer(

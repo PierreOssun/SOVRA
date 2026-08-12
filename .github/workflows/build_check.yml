@@ -69,5 +69,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test --workspace --verbose
+      # sovra-api is excluded here and run single-threaded below: its
+      # split_flow mTLS gates are internally multi-threaded and starve each
+      # other past the 10s ceremony ttl when run four-at-a-time on CI cores.
+      - name: cargo test (workspace except sovra-api)
+        run: cargo test --workspace --exclude sovra-api --verbose
+      - name: cargo test sovra-api (serial)
+        run: cargo test -p sovra-api --verbose -- --test-threads=1

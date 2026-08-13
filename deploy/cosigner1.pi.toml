@@ -1,0 +1,22 @@
+# Pi deployment template for cosigner 1 — copy to /opt/sovra/config/cosigner1.toml
+# and replace <MAC_TS_IP> with the orchestrator host's Tailscale IP.
+# Differences from config/cosigner1.toml: bind on all interfaces (the
+# orchestrator dials in over Tailscale), relay dialed over Tailscale, and the
+# shard is sealed at rest (the SD card leaves the desk).
+party_id = 1
+bind_addr = "0.0.0.0:4101"
+data_dir = "data/cosigner1"
+relay_url = "wss://<MAC_TS_IP>:3100/ws"
+policy_path = "config/policy1.toml"
+# mTLS material (issued on the Mac by `cargo xtask certs --san ...`, then
+# shipped over — ca.key.pem never leaves the Mac); missing files abort startup
+tls_ca_path = "certs/ca.cert.pem"
+tls_cert_path = "certs/cosigner1.cert.pem"
+tls_key_path = "certs/cosigner1.key.pem"
+# 32-byte hex key (`openssl rand -hex 32`); must exist BEFORE the first DKG —
+# enabling sealing later requires a key-refresh ceremony
+seal_key_path = "certs/seal1.key"
+# Filled during the roster ceremony (DEPLOY_RUNBOOK.md §6): full ordered
+# ed25519 roster, index = party id, own key included. Until set, the process
+# runs in bootstrap mode — it logs its verifying key and 409s dkg/sign.
+# participants = ["<vk0>", "<vk1>", "<vk2>"]

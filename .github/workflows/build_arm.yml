@@ -1,0 +1,34 @@
+name: Build ARM Cosigner
+
+# Produces the aarch64 `sovra-cosigner` binary deployed to the Raspberry Pi
+# (see DEPLOY_RUNBOOK.md). Separate from Build Check so it never gates PRs.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "fix-ci" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-arm:
+    name: build sovra-cosigner (aarch64)
+    # Native arm64 hosted runner — no cross-compilation. The binary links the
+    # runner's glibc (2.39), so the Pi must run Ubuntu 24.04 arm64. If the Pi
+    # runs Raspberry Pi OS Bookworm (glibc 2.36), switch to ubuntu-22.04-arm.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      # aws-lc-sys (rustls backend) compiles C + assembly; cmake and clang are
+      # on the hosted image but kept explicit so an image change fails loudly.
+      - name: Install aws-lc-sys build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release -p sovra-cosigner
+        run: cargo build --release -p sovra-cosigner
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sovra-cosigner-aarch64
+          path: target/release/sovra-cosigner
+          if-no-files-found: error

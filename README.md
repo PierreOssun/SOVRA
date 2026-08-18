@@ -1,4 +1,8 @@
+![Sovra](docs/images/SOVRA-banner.png)
+
 # Sovra — Self-Hosted MPC Signer for ECDSA
+
+**[sovra.ink](https://sovra.ink/)**
 
 Sovra is a t-of-n MPC signer, deployed as 2-of-3: two active cosigners plus a cold recovery shard. 
 

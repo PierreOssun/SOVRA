@@ -2,6 +2,9 @@
 //! verdict comes out. No I/O and no TOML dependency — the cosigner reads the
 //! file and hands the string to serde — so evaluation is exhaustively
 //! unit-testable and the crate stays lean enough for an embedded build.
+//! The view is `sovra_network::TxView`, a network-tagged enum: `evaluate`
+//! matches on it exhaustively, so a new network cannot slip past policy —
+//! it fails to compile until this crate decides its rules.
 //!
 //! The grammar is fail-closed at every edge: every field is required and a
 //! misspelled key refuses to parse (`deny_unknown_fields`), an empty
@@ -12,16 +15,7 @@
 
 use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Deserializer};
-
-/// The policy-relevant slice of a decoded EIP-1559 transaction.
-#[derive(Debug, Clone, Copy)]
-pub struct TxView<'a> {
-    pub chain_id: u64,
-    /// `None` means contract creation (`TxKind::Create`).
-    pub to: Option<Address>,
-    pub value: U256,
-    pub data: &'a [u8],
-}
+pub use sovra_network::{EthTxView, TxView};
 
 /// The outcome of a policy evaluation. A deny carries the first violated
 /// rule; the cosigner maps it to a 403 and the orchestrator relays it.
@@ -107,10 +101,19 @@ fn u256_from_dec_string<'de, D: Deserializer<'de>>(d: D) -> Result<U256, D::Erro
 }
 
 impl Policy {
-    /// Evaluate one decoded transaction against this policy. Fixed check
-    /// order (chain, destination shape, recipient, value, calldata) so the
-    /// reported reason is deterministic; the first violation wins.
-    pub fn evaluate(&self, tx: &TxView<'_>) -> Verdict {
+    /// Evaluate one decoded transaction against this policy. Exhaustive on
+    /// the network tag: a new network variant is a compile error here until
+    /// its rules exist.
+    pub fn evaluate(&self, view: &TxView<'_>) -> Verdict {
+        match view {
+            TxView::Ethereum(tx) => self.evaluate_ethereum(tx),
+        }
+    }
+
+    /// Fixed check order (chain, destination shape, recipient, value,
+    /// calldata) so the reported reason is deterministic; the first
+    /// violation wins.
+    fn evaluate_ethereum(&self, tx: &EthTxView<'_>) -> Verdict {
         if !self.allowed_chain_ids.contains(&tx.chain_id) {
             return Verdict::Deny(DenyReason::ChainId(tx.chain_id));
         }
@@ -161,12 +164,12 @@ mod tests {
     }
 
     fn tx(chain_id: u64, to: Option<Address>, value: u64, data: &'static [u8]) -> TxView<'static> {
-        TxView {
+        TxView::Ethereum(EthTxView {
             chain_id,
             to,
             value: U256::from(value),
             data,
-        }
+        })
     }
 
     #[test]

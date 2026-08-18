@@ -4614,6 +4614,7 @@ dependencies = [
  "sovra-ipc",
  "sovra-mpc",
  "sovra-mpc-dkls23-silence",
+ "sovra-network",
  "sovra-observability",
  "sovra-policy",
  "sovra-state",
@@ -4669,6 +4670,7 @@ dependencies = [
  "sovra-ipc",
  "sovra-mpc",
  "sovra-mpc-dkls23-silence",
+ "sovra-network",
  "sovra-observability",
  "sovra-policy",
  "sovra-state",
@@ -4694,7 +4696,10 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-transport",
+ "k256",
  "serde",
+ "sovra-network",
+ "sovra-types",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4718,6 +4723,7 @@ dependencies = [
  "sl-mpc-mate",
  "sovra-certs",
  "sovra-mpc",
+ "sovra-types",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4750,11 +4756,21 @@ dependencies = [
  "sl-mpc-mate",
  "sovra-eth",
  "sovra-mpc",
+ "sovra-network",
  "sovra-state",
  "sovra-types",
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sovra-network"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "sovra-types",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4771,6 +4787,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "serde",
+ "sovra-network",
  "thiserror 2.0.18",
  "toml",
 ]
@@ -4794,6 +4811,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

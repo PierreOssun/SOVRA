@@ -9,6 +9,7 @@ config = "0.15"
 serde = { version = "1", features = ["derive"] }
 sovra-ipc = { workspace = true }
 sovra-eth = { workspace = true, features = ["rpc"] }
+sovra-network = { workspace = true }
 sovra-observability = { workspace = true }
 sovra-mpc = { workspace = true }
 sovra-mpc-dkls23-silence = { workspace = true }

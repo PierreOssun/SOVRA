@@ -1,11 +1,17 @@
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use ed25519_dalek::SigningKey;
 use sl_mpc_mate::coord::SimpleMessageRelay;
-use sovra_types::KeyShare;
+use sovra_types::{KeyShare, PubkeySec1};
 
 use crate::{keygen_party, refresh_party, sign_party, types::PartyContext};
+
+/// The recovered verifying key, in the same identity encoding the ceremonies
+/// agree on — so "signature recovers to the wallet key" is one comparison.
+fn pubkey_of(vk: &k256::ecdsa::VerifyingKey) -> PubkeySec1 {
+    PubkeySec1::from_slice(&vk.to_sec1_bytes()).unwrap()
+}
 
 fn contexts(n: u8, threshold: u8, instance: B256) -> Vec<PartyContext> {
     let sks: Vec<SigningKey> = (0..n)
@@ -57,7 +63,7 @@ async fn wrong_peer_vk_breaks_keygen() {
 /// The M9 crypto pin, with no HTTP in the loop: a 2-of-3 keygen over all
 /// three parties, then a signature by subset {0, 2} — the case where a
 /// party's subset index differs from its global id (party 2 signs at
-/// party_idx 1). The signature must recover to the keygen address.
+/// party_idx 1). The signature must recover to the keygen public key.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_of_three_sign_with_subset_0_2() {
     let instance = B256::from(rand::random::<[u8; 32]>());
@@ -69,11 +75,11 @@ async fn two_of_three_sign_with_subset_0_2() {
         keygen_party(&ctxs[1], coord.connect()),
         keygen_party(&ctxs[2], coord.connect()),
     );
-    let (share0, addr0) = r0.unwrap();
-    let (_share1, addr1) = r1.unwrap();
-    let (share2, addr2) = r2.unwrap();
-    assert_eq!(addr0, addr1);
-    assert_eq!(addr0, addr2);
+    let (share0, pk0) = r0.unwrap();
+    let (_share1, pk1) = r1.unwrap();
+    let (share2, pk2) = r2.unwrap();
+    assert_eq!(pk0, pk1);
+    assert_eq!(pk0, pk2);
 
     // fresh instance for the sign run; party 1 sits it out entirely
     let sign_instance = B256::from(rand::random::<[u8; 32]>());
@@ -98,7 +104,7 @@ async fn two_of_three_sign_with_subset_0_2() {
     let recid = k256::ecdsa::RecoveryId::from_byte(p0.y_parity as u8).unwrap();
     let vk =
         k256::ecdsa::VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, recid).unwrap();
-    assert_eq!(Address::from_public_key(&vk), addr0);
+    assert_eq!(pubkey_of(&vk), pk0);
 }
 
 /// A party handed a subset it is not in must fail fast, before touching the
@@ -123,8 +129,8 @@ async fn sign_rejects_subset_without_this_party() {
 
 /// The M10 crypto pin: 2-of-3 keygen, party 1's shard is lost, the
 /// replacement host has a BRAND-NEW ed25519 identity. All three run the
-/// refresh ceremony; the recovered shard signs at the same address, and a
-/// surviving OLD shard can no longer co-sign with the new generation.
+/// refresh ceremony; the recovered shard signs under the same public key,
+/// and a surviving OLD shard can no longer co-sign with the new generation.
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_recovers_lost_shard_and_kills_old_generation() {
     let ctxs = contexts(3, 2, B256::from(rand::random::<[u8; 32]>()));
@@ -135,7 +141,7 @@ async fn refresh_recovers_lost_shard_and_kills_old_generation() {
         keygen_party(&ctxs[1], coord.connect()),
         keygen_party(&ctxs[2], coord.connect()),
     );
-    let (share0, address) = r0.unwrap();
+    let (share0, wallet_pk) = r0.unwrap();
     let (old_share1, _) = r1.unwrap();
     let (share2, _) = r2.unwrap();
 
@@ -176,9 +182,9 @@ async fn refresh_recovers_lost_shard_and_kills_old_generation() {
     let (new_share0, a0) = n0.unwrap();
     let (new_share1, a1) = n1.unwrap();
     let (_new_share2, a2) = n2.unwrap();
-    assert_eq!(a0, address, "refresh must not change the address");
-    assert_eq!(a1, address);
-    assert_eq!(a2, address);
+    assert_eq!(a0, wallet_pk, "refresh must not change the public key");
+    assert_eq!(a1, wallet_pk);
+    assert_eq!(a2, wallet_pk);
 
     // The RECOVERED shard signs: subset {0, 1} over the new generation.
     let sign_instance = B256::from(rand::random::<[u8; 32]>());
@@ -211,10 +217,10 @@ async fn refresh_recovers_lost_shard_and_kills_old_generation() {
     let recid = k256::ecdsa::RecoveryId::from_byte(p0.y_parity as u8).unwrap();
     let vk =
         k256::ecdsa::VerifyingKey::recover_from_prehash(digest.as_slice(), &sig, recid).unwrap();
-    assert_eq!(Address::from_public_key(&vk), address);
+    assert_eq!(pubkey_of(&vk), wallet_pk);
 
     // The OLD shard is dead: mixing it with a new-generation shard must not
-    // yield a signature that recovers to the wallet address. Depending on
+    // yield a signature that recovers to the wallet key. Depending on
     // where the inconsistency surfaces, the run may error, stall, or emit
     // garbage — every one of those outcomes is a pass; a valid signature is
     // the only failure.
@@ -259,8 +265,8 @@ async fn refresh_recovers_lost_shard_and_kills_old_generation() {
                 });
                 if let Some(vk) = recovered {
                     assert_ne!(
-                        Address::from_public_key(&vk),
-                        address,
+                        pubkey_of(&vk),
+                        wallet_pk,
                         "an old shard co-signed a valid signature after refresh"
                     );
                 }

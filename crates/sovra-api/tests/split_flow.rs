@@ -25,8 +25,20 @@ use sovra_ipc::{
     tls::{TlsMaterials, serve_mtls},
 };
 use sovra_state::SignerStore;
+use sovra_types::PubkeySec1;
 use test_helpers::*;
 use url::Url;
+
+/// Both identities of a fresh DKG response: the chain-neutral key (what
+/// consensus and recovery compare) and its Ethereum address (what signatures
+/// recover to).
+fn dkg_identities(body: &[u8]) -> (PubkeySec1, Address) {
+    let v = json(body);
+    (
+        PubkeySec1::from_str(v["public_key"].as_str().unwrap()).unwrap(),
+        Address::from_str(v["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
+    )
+}
 
 // copied from cosigner_flow.rs; the hub rides the orchestrator's materials,
 // mirroring run.rs
@@ -114,7 +126,7 @@ async fn spawn_cosigner(
     (Url::parse(&format!("https://{addr}/")).unwrap(), handle)
 }
 
-fn api_router(cosigners: &[(u8, Url)], active: Option<Address>, tls: &TlsMaterials) -> Router {
+fn api_router(cosigners: &[(u8, Url)], active: Option<PubkeySec1>, tls: &TlsMaterials) -> Router {
     let provider = sovra_eth::http_provider("http://127.0.0.1:9") // dummy, sign never touches RPC
         .unwrap()
         .erased();
@@ -180,15 +192,15 @@ async fn split_flow() {
     assert_eq!(active, None);
     let router = api_router(&urls, active, &tls.orchestrator);
 
-    // 2. dkg through the full stack; the address cross-check runs inside RemoteBackend
+    // 2. dkg through the full stack; the pubkey cross-check runs inside RemoteBackend
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
+    let (public_key, address) = dkg_identities(&body);
 
     let (status, body) = call(&router, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap(),
+        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
         address
     );
 
@@ -203,7 +215,7 @@ async fn split_flow() {
         expected_digest.to_string()
     );
     assert_eq!(
-        Address::from_str(resp["recovered_address"].as_str().unwrap()).unwrap(),
+        Address::from_str(resp["signer_address"].as_str().unwrap()).unwrap(),
         address
     );
     let signed = Bytes::from_str(resp["signed_transaction"].as_str().unwrap()).unwrap();
@@ -220,12 +232,12 @@ async fn split_flow() {
     let active = orchestrator::recover_active(&probe, &urls, 2)
         .await
         .unwrap();
-    assert_eq!(active, Some(address));
+    assert_eq!(active, Some(public_key));
     let router2 = api_router(&urls, active, &tls.orchestrator);
     let (status, body) = call(&router2, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap(),
+        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
         address
     );
     // fresh idempotency cache -> MPC re-runs through the split path on reloaded shards
@@ -252,7 +264,7 @@ async fn split_flow() {
     // 7. cosigner-down sign -> 502 with the generic no-leak body.
     //    Fresh router == fresh RemoteBackend == fresh reqwest pool (same reason),
     //    and a different tx so the digest can't hit any idempotency path.
-    let router3 = api_router(&urls, Some(address), &tls.orchestrator);
+    let router3 = api_router(&urls, Some(public_key), &tls.orchestrator);
     let (raw2, _) = unsigned_tx(2_000_000_000);
     let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
     let (status, body) = call(&router3, post_json("/v1/sign", req2)).await;
@@ -326,10 +338,10 @@ async fn split_flow_2of3() {
     let router = api_router(&urls, active, &tls.orchestrator);
 
     // 2. dkg needs ALL THREE parties (and passes the /roster pre-flight);
-    //    RemoteBackend enforces three-way address consensus
+    //    RemoteBackend enforces three-way pubkey consensus
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
+    let (public_key, address) = dkg_identities(&body);
 
     // 3. all parties up: the preferred pair {0, 1} signs
     let (raw1, _) = unsigned_tx(1_000_000_000);
@@ -345,7 +357,7 @@ async fn split_flow_2of3() {
     //    (keep-alive connections outlive the abort).
     h1.abort();
     let _ = h1.await;
-    let router2 = api_router(&urls, Some(address), &tls.orchestrator);
+    let router2 = api_router(&urls, Some(public_key), &tls.orchestrator);
     let (raw2, _) = unsigned_tx(2_000_000_000);
     let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
     let (status, body) = call(&router2, post_json("/v1/sign", req2)).await;
@@ -381,7 +393,7 @@ async fn split_flow_2of3() {
         (1u8, url1b),
         (2u8, urls[2].1.clone()),
     ];
-    let router3 = api_router(&urls_b, Some(address), &tls.orchestrator);
+    let router3 = api_router(&urls_b, Some(public_key), &tls.orchestrator);
     // ~10s: party 0 allows and waits out its lonely run's ttl; party 1 vetoes.
     let (raw3, _) = unsigned_tx(3_000_000_000);
     let req3 = serde_json::json!({ "unsigned_transaction": raw3.to_string() });
@@ -410,7 +422,7 @@ async fn split_flow_2of3() {
     let active = orchestrator::recover_active(&probe2, &urls_b, 2)
         .await
         .unwrap();
-    assert_eq!(active, Some(address));
+    assert_eq!(active, Some(public_key));
 
     h1b.abort();
     let _ = h1b.await;
@@ -489,7 +501,7 @@ async fn recover_flow_2of3() {
     let router = api_router(&urls, None, &tls.orchestrator);
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
+    let (public_key, address) = dkg_identities(&body);
     let (raw1, _) = unsigned_tx(1_000_000_000);
     let req1 = serde_json::json!({ "unsigned_transaction": raw1.to_string() });
     let (status, _) = call(&router, post_json("/v1/sign", req1)).await;
@@ -552,7 +564,7 @@ async fn recover_flow_2of3() {
     let active = orchestrator::recover_active(&probe, &urls_b, 2)
         .await
         .unwrap();
-    assert_eq!(active, Some(address));
+    assert_eq!(active, Some(public_key));
 
     // 5. The ceremony: same address comes back, and the recovered generation
     //    signs through the full stack.
@@ -564,7 +576,7 @@ async fn recover_flow_2of3() {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(
-        Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap(),
+        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
         address
     );
 

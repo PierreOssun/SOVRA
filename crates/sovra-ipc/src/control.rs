@@ -11,9 +11,10 @@
 //! bytes it decoded itself; its `Bytes` field is why it alone isn't `Copy`.
 //! Pattern: DTO / anti-corruption layer between wire and domain.
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use sovra_mpc::EcdsaParts;
+use sovra_types::{NetworkId, PubkeySec1};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StartDkgRequest {
@@ -28,6 +29,10 @@ pub struct StartDkgRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSignRequest {
     pub instance: B256,
+    /// Selects the decoder. Defense in depth, not trust: each cosigner's
+    /// per-network decode is strict, so a tag that mismatches the bytes
+    /// fails closed at every party.
+    pub network: NetworkId,
     pub unsigned_transaction: Bytes,
     /// The signing subset: global party ids, strictly ascending (canonical
     /// order — every selected party must derive the identical subset vector).
@@ -37,24 +42,25 @@ pub struct StartSignRequest {
 
 /// `POST /refresh` body — one party's view of the recovery re-share
 /// ceremony. Like DKG, `n_parties`/`threshold` are assertions against local
-/// config. `public_key` (33-byte compressed SEC1) is the ceremony's anchor:
-/// survivors verify it against their own shard, the lost party adopts it as
-/// the expected reconstruction target — a wrong value fails the ceremony.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// config. `public_key` is the ceremony's anchor: survivors verify it
+/// against their own shard, the lost party adopts it as the expected
+/// reconstruction target — a wrong value fails the ceremony.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StartRefreshRequest {
     pub instance: B256,
     pub n_parties: u8,
     pub threshold: u8,
     pub lost_party: u8,
-    pub public_key: Bytes,
+    pub public_key: PubkeySec1,
 }
 
-/// `GET /pubkey` response: the wallet's compressed SEC1 public key, derived
-/// from this party's shard. Public data — it is the key the whole world can
-/// already compute from any on-chain signature.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The wallet's compressed SEC1 public key — the answer of `GET /pubkey`
+/// (derived from this party's shard), `GET /signer` (from stored metadata),
+/// and every ceremony (`/dkg`, `/refresh`). Public data — it is the key the
+/// whole world can already compute from any on-chain signature.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PublicKeyInfo {
-    pub public_key: Bytes,
+    pub public_key: PubkeySec1,
 }
 
 /// `GET /roster` response — the DKG pre-flight consistency probe. The
@@ -68,15 +74,17 @@ pub struct RosterInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SignerInfo {
-    pub address: Address,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SignParts {
     pub r: U256,
     pub s: U256,
     pub y_parity: bool,
+}
+
+/// `POST /sign` response: one signature per digest the network defines for
+/// the request's bytes, in digest order (Ethereum: exactly one).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignaturesInfo {
+    pub signatures: Vec<SignParts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

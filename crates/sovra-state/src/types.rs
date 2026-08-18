@@ -8,9 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use alloy_primitives::Address;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
-use sovra_types::SignerId;
+use sovra_types::{PubkeySec1, SignerId};
 
 /// Seals/unseals shard bytes at rest
 pub trait ShardSealer: Send + Sync {
@@ -105,8 +104,8 @@ pub enum StateError {
     Serde(#[from] serde_json::Error),
     #[error("signer not found: {0}")]
     NotFound(SignerId),
-    #[error("no signer found for address {0}")]
-    AddressNotFound(Address),
+    #[error("no signer found for public key {0}")]
+    PubkeyNotFound(PubkeySec1),
     #[error("invalid signer id: {0}")]
     InvalidSignerId(SignerId),
     #[error("could not unseal shard")]
@@ -114,5 +113,5 @@ pub enum StateError {
     #[error(
         "metadata for {0} present but shard missing; partial dkg persistence — wipe the store dir and re-run dkg"
     )]
-    PartialState(Address),
+    PartialState(PubkeySec1),
 }

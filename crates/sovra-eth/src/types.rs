@@ -247,6 +247,13 @@ pub enum PrepareError {
     Enrich(#[from] EnrichError),
 }
 
+/// A 33-byte, correctly-prefixed pubkey that is nonetheless not a curve
+/// point. Unreachable for keys produced by the MPC layer — a broken
+/// invariant (500), never a caller mistake.
+#[derive(Error, Debug)]
+#[error("public key is not a valid secp256k1 point")]
+pub struct PubkeyError;
+
 #[derive(Error, Debug)]
 pub enum FinalizeError {
     #[error("could not recover signer from signature")]

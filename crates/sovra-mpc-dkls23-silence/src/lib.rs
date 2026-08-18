@@ -22,10 +22,9 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use derivation_path::DerivationPath;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use k256::ecdsa::VerifyingKey as K256VerifyingKey;
 pub use sl_dkls23::keygen::Keyshare;
 use sl_dkls23::{
     keygen::{self},
@@ -39,9 +38,11 @@ use sl_mpc_mate::{
     },
     message::InstanceId,
 };
-use sovra_mpc::{EcdsaParts, MpcBackend, MpcError, to_ecdsa_parts};
+use sovra_eth::Ethereum;
+use sovra_mpc::{EcdsaParts, MpcBackend, MpcError, sub_instance, to_ecdsa_parts};
+use sovra_network::Network;
 use sovra_state::SignerStore;
-use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
+use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, NetworkId, PubkeySec1, SignerId, SignerMetadata};
 
 use crate::types::PartyContext;
 
@@ -86,37 +87,37 @@ impl InProcessBackend {
         }
     }
 
-    /// Shared tail of dkg and refresh: collect every party's (share, address),
-    /// require address consensus, persist all shards atomically.
+    /// Shared tail of dkg and refresh: collect every party's (share, pubkey),
+    /// require public-key consensus, persist all shards atomically.
     fn persist_generation(
         &self,
-        results: Vec<Result<(KeyShare, Address), MpcError>>,
+        results: Vec<Result<(KeyShare, PubkeySec1), MpcError>>,
         op: &str,
-    ) -> Result<Address, MpcError> {
+    ) -> Result<PubkeySec1, MpcError> {
         let mut pairs = Vec::with_capacity(results.len());
         for r in results {
             pairs.push(r?);
         }
-        let address = pairs[0].1;
-        if let Some((_, other)) = pairs.iter().find(|(_, addr)| *addr != address) {
+        let public_key = pairs[0].1;
+        if let Some((_, other)) = pairs.iter().find(|(_, pk)| *pk != public_key) {
             return Err(MpcError::PartyMismatch(format!(
-                "{op} addresses differ: {address} != {other}"
+                "{op} public keys differ: {public_key} != {other}"
             )));
         }
         let meta = SignerMetadata {
             signer_id: SignerId::new(ACTIVE_SIGNER_ID),
-            address,
+            public_key,
         };
         for (store, (share, _)) in self.stores.iter().zip(&pairs) {
             store
                 .save_shard(&meta, share)
                 .map_err(|e| MpcError::Dkg(e.to_string()))?;
         }
-        Ok(address)
+        Ok(public_key)
     }
 }
 impl MpcBackend for InProcessBackend {
-    async fn dkg(&self) -> Result<Address, MpcError> {
+    async fn dkg(&self) -> Result<PubkeySec1, MpcError> {
         let instance = B256::from(rand::random::<[u8; 32]>());
         let coord = SimpleMessageRelay::new();
 
@@ -130,14 +131,21 @@ impl MpcBackend for InProcessBackend {
         self.persist_generation(results, "dkg")
     }
 
-    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
-        // Mirror the production trust shape: the digest is derived here from
+    async fn sign(
+        &self,
+        network: NetworkId,
+        unsigned_tx: &[u8],
+    ) -> Result<Vec<EcdsaParts>, MpcError> {
+        // Mirror the production trust shape: digests are derived here from
         // decoded bytes — this backend cannot be handed a digest to sign.
-        let prepared = sovra_eth::decode_unsigned(unsigned_tx)
-            .map_err(|e| MpcError::Sign(format!("undecodable transaction: {e}")))?;
-        sovra_eth::prepare::validate_unsigned(&prepared.tx)
-            .map_err(|e| MpcError::Sign(format!("invalid transaction: {e}")))?;
-        let signing_hash = prepared.signing_hash;
+        let digests = match network {
+            NetworkId::Ethereum => {
+                let tx = <Ethereum as Network>::decode_unsigned(unsigned_tx)
+                    .map_err(|e| MpcError::Sign(e.to_string()))?;
+                <Ethereum as Network>::validate(&tx).map_err(|e| MpcError::Sign(e.to_string()))?;
+                <Ethereum as Network>::signing_digests(&tx)
+            }
+        };
         let id = SignerId::new(ACTIVE_SIGNER_ID);
 
         // The first t parties stand in for subset selection (RemoteBackend's
@@ -152,33 +160,40 @@ impl MpcBackend for InProcessBackend {
             );
         }
 
+        // Same per-digest instance derivation as the cosigner path; one
+        // relay and one all-party run per digest, cross-checked each round.
         let instance = B256::from(rand::random::<[u8; 32]>());
-        let coord = SimpleMessageRelay::new();
-
-        let ctxs: Vec<PartyContext> = subset.iter().map(|&p| self.ctx(p, instance)).collect();
-        let results =
-            futures_util::future::join_all(ctxs.iter().zip(&shares).map(|(ctx, share)| {
-                sign_party(ctx, share, signing_hash, &subset, coord.connect())
-            }))
-            .await;
-        let mut all = Vec::with_capacity(results.len());
-        for r in results {
-            all.push(r?);
+        let mut signatures = Vec::with_capacity(digests.len());
+        for (index, digest) in digests.iter().enumerate() {
+            let run_instance = sub_instance(instance, index as u32);
+            let coord = SimpleMessageRelay::new();
+            let ctxs: Vec<PartyContext> =
+                subset.iter().map(|&p| self.ctx(p, run_instance)).collect();
+            let results =
+                futures_util::future::join_all(ctxs.iter().zip(&shares).map(|(ctx, share)| {
+                    sign_party(ctx, share, (*digest).into(), &subset, coord.connect())
+                }))
+                .await;
+            let mut all = Vec::with_capacity(results.len());
+            for r in results {
+                all.push(r?);
+            }
+            let parts = all[0];
+            if all.iter().any(|p| *p != parts) {
+                return Err(MpcError::PartyMismatch(
+                    "sign parts differ between parties".into(),
+                ));
+            }
+            signatures.push(parts);
         }
-        let parts = all[0];
-        if all.iter().any(|p| *p != parts) {
-            return Err(MpcError::PartyMismatch(
-                "sign parts differ between parties".into(),
-            ));
-        }
-        Ok(parts)
+        Ok(signatures)
     }
 
     /// All n parties in one process. Whatever the lost store still holds is
     /// ignored (production instead refuses a declared-lost party that has a
     /// shard) — this backend exists to pin the HTTP contract, and letting it
     /// run without file surgery keeps the api tests simple.
-    async fn refresh(&self, lost_party: u8) -> Result<Address, MpcError> {
+    async fn refresh(&self, lost_party: u8) -> Result<PubkeySec1, MpcError> {
         let n = self.stores.len();
         if lost_party as usize >= n {
             return Err(MpcError::Dkg(format!(
@@ -228,26 +243,18 @@ impl MpcBackend for InProcessBackend {
     }
 }
 
-/// Ethereum address from a keyshare's shared public key. Reuses alloy's
-/// keccak-based derivation — no hand-rolled hashing.
-pub fn address_from_keyshare(keyshare: &Keyshare) -> Result<Address, MpcError> {
-    let affine = keyshare.public_key().to_affine();
-    let vk = K256VerifyingKey::from_affine(affine)
-        .map_err(|e| MpcError::Dkg(format!("bad public key: {e}")))?;
-    Ok(Address::from_public_key(&vk))
-}
-
-/// Compressed SEC1 encoding (33 bytes) of a keyshare's shared public key —
-/// the value a refresh ceremony's lost party needs as `expected_public_key`.
-pub fn compressed_public_key(keyshare: &Keyshare) -> [u8; 33] {
+/// The wallet's public key as this party's keyshare knows it — the identity
+/// every ceremony agrees on, and a refresh ceremony's reconstruction anchor.
+pub fn compressed_public_key(keyshare: &Keyshare) -> PubkeySec1 {
     use k256::elliptic_curve::sec1::ToEncodedPoint;
-    keyshare
-        .public_key()
-        .to_affine()
-        .to_encoded_point(true)
-        .as_bytes()
-        .try_into()
-        .expect("a compressed sec1 point is 33 bytes")
+    PubkeySec1::from_slice(
+        keyshare
+            .public_key()
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes(),
+    )
+    .expect("a compressed sec1 point is 33 bytes with a 0x02/0x03 prefix")
 }
 
 /// Validated setup for the ceremonies that involve ALL n parties (keygen and
@@ -287,9 +294,9 @@ pub async fn refresh_party(
     ctx: &PartyContext,
     old_share: Option<&KeyShare>,
     lost_party: u8,
-    public_key: &[u8; 33],
+    public_key: &PubkeySec1,
     relay: impl Relay,
-) -> Result<(KeyShare, Address), MpcError> {
+) -> Result<(KeyShare, PubkeySec1), MpcError> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     let setup = keygen_setup(ctx)?;
     let n = ctx.party_vks.len();
@@ -306,7 +313,7 @@ pub async fn refresh_party(
             "a {n}-of-{n} scheme has no redundancy to recover a lost share",
         )));
     }
-    let encoded = k256::EncodedPoint::from_bytes(public_key)
+    let encoded = k256::EncodedPoint::from_bytes(public_key.as_bytes())
         .map_err(|e| MpcError::Dkg(format!("bad expected public key: {e}")))?;
     let expected =
         Option::<k256::ProjectivePoint>::from(k256::ProjectivePoint::from_encoded_point(&encoded))
@@ -372,22 +379,22 @@ pub async fn refresh_party(
     log_bandwidth(ctx.party_id, &stats, "refresh");
 
     // Belt over the protocol's own expected_public_key check.
-    if compressed_public_key(&keyshare) != *public_key {
+    let produced = compressed_public_key(&keyshare);
+    if produced != *public_key {
         return Err(MpcError::PartyMismatch(
             "refresh produced a different public key".into(),
         ));
     }
-    let address = address_from_keyshare(&keyshare)?;
-    Ok((KeyShare::from(keyshare.as_slice().to_vec()), address))
+    Ok((KeyShare::from(keyshare.as_slice().to_vec()), produced))
 }
 
 /// This party's share of a t-of-n DKG over the full roster. Returns its own
-/// shard (opaque bytes for the store) and the address it independently
+/// shard (opaque bytes for the store) and the public key it independently
 /// derived from that shard.
 pub async fn keygen_party(
     ctx: &PartyContext,
     relay: impl Relay,
-) -> Result<(KeyShare, Address), MpcError> {
+) -> Result<(KeyShare, PubkeySec1), MpcError> {
     let setup = keygen_setup(ctx)?;
     let stats = Stats::alloc();
     let keyshare = keygen::run(setup, rand::random(), RelayStats::new(relay, stats.clone()))
@@ -395,9 +402,9 @@ pub async fn keygen_party(
         .map_err(|e| MpcError::Dkg(e.to_string()))?;
     log_bandwidth(ctx.party_id, &stats, "dkg");
 
-    let address = address_from_keyshare(&keyshare)?; // library `Keyshare` -> Address
+    let public_key = compressed_public_key(&keyshare); // library `Keyshare` -> identity
     let share = KeyShare::from(keyshare.as_slice().to_vec()); // library -> opaque bytes
-    Ok((share, address))
+    Ok((share, public_key))
 }
 
 /// This party's share of a signing round over `digest`, run by the `subset`
@@ -491,10 +498,10 @@ fn log_bandwidth(party_id: u8, stats: &Arc<Mutex<Stats>>, phase: &str) {
 
 impl InProcessBackend {
     /// Startup recovery for the test backend: all stores empty → None; all
-    /// holding the same address → Some; anything else is partial DKG state.
-    /// Stricter than the orchestrator's n-way probe on purpose — every store
-    /// is local here, so there is no "cold party" to tolerate.
-    pub fn recover_active(&self) -> Result<Option<Address>, MpcError> {
+    /// holding the same public key → Some; anything else is partial DKG
+    /// state. Stricter than the orchestrator's n-way probe on purpose —
+    /// every store is local here, so there is no "cold party" to tolerate.
+    pub fn recover_active(&self) -> Result<Option<PubkeySec1>, MpcError> {
         let id = SignerId::new(ACTIVE_SIGNER_ID);
         let mut reports = Vec::with_capacity(self.stores.len());
         for (party, store) in self.stores.iter().enumerate() {

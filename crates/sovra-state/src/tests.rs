@@ -1,15 +1,20 @@
-use alloy_primitives::Address;
-use sovra_types::{KeyShare, SignerId, SignerMetadata};
+use sovra_types::{KeyShare, PubkeySec1, SignerId, SignerMetadata};
 
 use crate::{
     SHARD_FILE, SignerStore,
     types::{ShardSealer, StateError},
 };
 
+fn pubkey(byte: u8) -> PubkeySec1 {
+    let mut b = [byte; 33];
+    b[0] = 0x02;
+    PubkeySec1::from_slice(&b).unwrap()
+}
+
 fn signer(id: &str, byte: u8) -> SignerMetadata {
     SignerMetadata {
         signer_id: SignerId::new(id),
-        address: Address::from([byte; 20]),
+        public_key: pubkey(byte),
     }
 }
 
@@ -62,21 +67,20 @@ fn two_party_separate_roots() {
 }
 
 #[test]
-fn address_lookup() {
+fn public_key_lookup() {
     let tmp = tempfile::tempdir().unwrap();
     let store = SignerStore::open(tmp.path()).unwrap();
     let meta = signer("signer-1", 0x11);
     store.save_shard(&meta, &shard(b"x")).unwrap();
 
     assert_eq!(
-        store.find_by_address(&meta.address).unwrap(),
+        store.find_by_public_key(&meta.public_key).unwrap(),
         meta.signer_id
     );
 
-    let missing = Address::from([0xAB; 20]);
     assert!(matches!(
-        store.find_by_address(&missing),
-        Err(StateError::AddressNotFound(_))
+        store.find_by_public_key(&pubkey(0xAB)),
+        Err(StateError::PubkeyNotFound(_))
     ));
 }
 

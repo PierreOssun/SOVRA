@@ -13,6 +13,7 @@ rust-version = "1.85"
 # in-process backend) get the pure core; sovra-api opts into "rpc".
 sovra-eth = { path = "crates/sovra-eth", default-features = false }
 sovra-observability = { path = "crates/sovra-observability" }
+sovra-network = { path = "crates/sovra-network" }
 sovra-policy = { path = "crates/sovra-policy" }
 sovra-types = { path = "crates/sovra-types" }
 sovra-state = { path = "crates/sovra-state" }

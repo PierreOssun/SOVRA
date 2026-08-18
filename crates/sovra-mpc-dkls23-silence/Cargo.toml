@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 sovra-eth = { workspace = true }
+sovra-network = { workspace = true }
 sovra-mpc = { workspace = true }
 sovra-types = { workspace = true }
 sovra-state = { workspace = true }

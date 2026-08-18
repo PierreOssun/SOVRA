@@ -26,6 +26,7 @@ mod finalize;
 #[cfg(feature = "rpc")]
 mod broadcast;
 mod encoding;
+mod network;
 #[cfg(test)]
 mod tests;
 
@@ -42,6 +43,7 @@ use alloy_provider::Provider;
 #[cfg(feature = "rpc")]
 pub use broadcast::broadcast_via_rpc_impl;
 pub use encoding::{decode_signed, decode_unsigned, encode_unsigned};
+pub use network::Ethereum;
 pub use prepare::prepare;
 #[cfg(feature = "rpc")]
 pub use prepare::{http_provider, prepare_from_rpc_impl};
@@ -77,4 +79,12 @@ pub fn finalize(
     expected_from: Address,
 ) -> Result<SignedTx, FinalizeError> {
     finalize_impl(prepared_tx, r, s, y_parity, expected_from)
+}
+
+/// Ethereum's view of the chain-neutral key identity: keccak-derived address
+/// from the compressed SEC1 pubkey. The one place this derivation lives —
+/// consensus and storage compare pubkeys, never addresses.
+pub fn address_from_sec1(pk: &sovra_types::PubkeySec1) -> Result<Address, PubkeyError> {
+    let vk = k256::ecdsa::VerifyingKey::from_sec1_bytes(pk.as_bytes()).map_err(|_| PubkeyError)?;
+    Ok(Address::from_public_key(&vk))
 }

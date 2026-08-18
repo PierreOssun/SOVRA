@@ -31,14 +31,21 @@ async fn dkg_sign_finalize_roundtrip() {
         2,
     );
 
-    let address = backend.dkg().await.expect("dkg");
+    let public_key = backend.dkg().await.expect("dkg");
+    let address = sovra_eth::address_from_sec1(&public_key).expect("derive address");
 
     let prepared = prepare(base_intent()).expect("prepare");
 
-    let parts = backend
-        .sign(&encode_unsigned(&prepared.tx))
+    let signatures = backend
+        .sign(
+            sovra_types::NetworkId::Ethereum,
+            &encode_unsigned(&prepared.tx),
+        )
         .await
         .expect("sign");
+    let [parts] = signatures.as_slice() else {
+        panic!("ethereum signs exactly one digest");
+    };
 
     let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, address).expect("finalize");
 

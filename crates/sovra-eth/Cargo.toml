@@ -27,6 +27,9 @@ alloy-rpc-types-eth = { workspace = true, optional = true }
 thiserror = { workspace = true }
 alloy-rlp = { workspace = true }
 serde = { workspace = true }
+sovra-types = { workspace = true }
+sovra-network = { workspace = true }
+k256 = { workspace = true }
 url = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
 tracing = { workspace = true }

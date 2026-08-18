@@ -42,7 +42,7 @@ Three transaction-lifecycle endpoints (`prepare`, `sign`, `broadcast`), plus ope
 
 ### `POST /v1/prepare`
 
-Build an unsigned EIP-1559 transaction from intent.
+Build an unsigned transaction from intent (legacy, EIP-2930, or EIP-1559 — default).
 Request: `{ to, value, data? }` (`data` defaults to `0x`).
 `from` is always the active DKG address (`409` if DKG has not run).
 
@@ -64,7 +64,7 @@ so the operator can independently verify the derived address.
 Execute signing across the selected t cosigners over the supplied unsigned transaction.
 Request: `{ unsigned_transaction }` — the `0x02…`-prefixed bytes from `prepare`
 
-Response: `{ signed_transaction, signature: { r, s, y_parity }, recovered_address, tx_digest }`.
+Response: `{ network, signed_transaction, signatures: [{ r, s, y_parity }], signer_address, tx_digest }`.
 
 ### `POST /v1/broadcast`
 
@@ -93,7 +93,7 @@ These are deliberate deferrals, not gaps:
 - TLS certificate lifecycle (rotation, revocation)
 - Concurrent signing sessions (global lock for PoC)
 - Observability backend (local JSON logs only)
-- Multi-chain support (Sepolia only)
+- Multi-chain support (the `Network` seam exists — `sovra-network` — but Ethereum/Sepolia is the only implementation)
 - Automated backup and restore (manual archive only)
 - Plain shard rotation without loss and quorum changes (`quorum_change`) — recovery of a lost shard IS supported (`POST /v1/recover`, see RUN.md)
 

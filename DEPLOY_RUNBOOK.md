@@ -215,7 +215,7 @@ DKG needs **all three** parties online simultaneously.
 
    ```bash
    cargo run -p sovra-cli -- dkg
-   # → { "address": "0x…" }   ← the threshold signer's Ethereum address
+   # → { "public_key": "0x02…", "addresses": { "ethereum": "0x…" } }
    ```
 
    Timing is safe over Tailscale: the MPC ttl is 60 s and the orchestrator's

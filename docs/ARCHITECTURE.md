@@ -43,7 +43,7 @@ Three transaction-lifecycle endpoints (`prepare`, `sign`, `broadcast`), plus ope
 
 ### `POST /v1/prepare`
 
-Build an unsigned EIP-1559 transaction from intent.
+Build an unsigned transaction from intent (legacy, EIP-2930, or EIP-1559 — default).
 
 ### `POST /v1/sign`
 
@@ -65,9 +65,10 @@ sovra-mpc-poc/
 │   ├── sovra-cli/           # Operator CLI (talks to Orchestrator only)
 │   ├── sovra-types/         # Shared identifiers, session states, errors
 │   ├── sovra-ipc/           # HTTP/JSON control + WS relay, mTLS transport
-│   ├── sovra-mpc/           # ThresholdSigner trait
+│   ├── sovra-mpc/           # MpcBackend trait (chain-neutral seam)
 │   ├── sovra-mpc-dkls23-silence/  # Silence Labs DKLs23 adapter
-│   ├── sovra-eth/           # Tx prep, encoding, verification, broadcast
+│   ├── sovra-network/       # Network trait + tagged TxView/TxError
+│   ├── sovra-eth/           # Ethereum impl: tx prep, encoding, finalize, broadcast
 │   ├── sovra-state/         # Filesystem repositories
 │   └── sovra-observability/ # Structured logging
 ├── config/
@@ -76,3 +77,22 @@ sovra-mpc-poc/
 ├── docs/
 └── scripts/
 ```
+
+## 4. Adding a network
+
+The key identity is the 33-byte compressed SEC1 pubkey (`PubkeySec1`);
+addresses are per-network derivations. ECDSA/secp256k1 is the only signature
+scheme. To add a network (e.g. Bitcoin):
+
+1. New crate implementing `sovra_network::Network` (associated `Unsigned`
+   type; `signing_digests` may return several digests — one MPC ceremony runs
+   per digest on a derived `sub_instance`).
+2. Add the `NetworkId` variant. The compiler then forces every decision
+   point: `Policy::evaluate` (its rules), the cosigner's `vet` dispatch, the
+   orchestrator's `sign` dispatch, and the concrete `prepare`/`broadcast`
+   arms (enrichment I/O is deliberately outside the trait).
+3. Add a `TxView` variant + policy grammar for the network (absent policy
+   table = deny).
+
+Cosigners always receive full self-describing tx bytes, never digests, and
+re-derive everything they sign — any new network must keep that invariant.

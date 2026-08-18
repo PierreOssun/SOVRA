@@ -24,15 +24,16 @@
 
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{B256, Bytes};
 use reqwest::StatusCode;
 use serde::{Serialize, de::DeserializeOwned};
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError, Veto};
+use sovra_types::{NetworkId, PubkeySec1};
 use url::Url;
 
 use crate::{
     control::{
-        CORRELATION_HEADER, CORRELATION_ID, PublicKeyInfo, RosterInfo, SignParts, SignerInfo,
+        CORRELATION_HEADER, CORRELATION_ID, PublicKeyInfo, RosterInfo, SignaturesInfo,
         StartDkgRequest, StartRefreshRequest, StartSignRequest,
     },
     tls::TlsMaterials,
@@ -56,7 +57,7 @@ pub struct RemoteBackend {
 }
 
 impl MpcBackend for RemoteBackend {
-    async fn dkg(&self) -> Result<Address, MpcError> {
+    async fn dkg(&self) -> Result<PubkeySec1, MpcError> {
         // Pre-flight: a mismatched roster otherwise fails as an opaque MPC
         // timeout (wrong vks change MsgId routing) — catch it as config.
         self.preflight_roster().await?;
@@ -65,12 +66,16 @@ impl MpcBackend for RemoteBackend {
             n_parties: self.cosigners.len() as u8,
             threshold: self.threshold as u8,
         };
-        self.broadcast::<_, SignerInfo>(&self.cosigners, "dkg", &req)
+        self.broadcast::<_, PublicKeyInfo>(&self.cosigners, "dkg", &req)
             .await
-            .map(|i| i.address)
+            .map(|i| i.public_key)
     }
 
-    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
+    async fn sign(
+        &self,
+        network: NetworkId,
+        unsigned_tx: &[u8],
+    ) -> Result<Vec<EcdsaParts>, MpcError> {
         let signers = self.select_signers().await?;
         // Selection is by preference; the wire order is canonical (ascending)
         // so every party derives the identical subset vector.
@@ -79,15 +84,18 @@ impl MpcBackend for RemoteBackend {
         tracing::info!(?participants, "signing subset selected");
         let req = StartSignRequest {
             instance: B256::from(rand::random::<[u8; 32]>()),
+            network,
             unsigned_transaction: Bytes::copy_from_slice(unsigned_tx),
             participants,
         };
-        self.broadcast::<_, SignParts>(&signers, "sign", &req)
+        // `combine`'s equality cross-check covers the whole vector: parties
+        // must agree on every digest's signature, in order.
+        self.broadcast::<_, SignaturesInfo>(&signers, "sign", &req)
             .await
-            .map(Into::into)
+            .map(|i| i.signatures.into_iter().map(Into::into).collect())
     }
 
-    async fn refresh(&self, lost_party: u8) -> Result<Address, MpcError> {
+    async fn refresh(&self, lost_party: u8) -> Result<PubkeySec1, MpcError> {
         if !self.cosigners.iter().any(|(party, _)| *party == lost_party) {
             return Err(MpcError::Dkg(format!(
                 "lost party {lost_party} is not in the cosigner set"
@@ -130,11 +138,11 @@ impl MpcBackend for RemoteBackend {
             n_parties: self.cosigners.len() as u8,
             threshold: self.threshold as u8,
             lost_party,
-            public_key: first.public_key.clone(),
+            public_key: first.public_key,
         };
-        self.broadcast::<_, SignerInfo>(&self.cosigners, "refresh", &req)
+        self.broadcast::<_, PublicKeyInfo>(&self.cosigners, "refresh", &req)
             .await
-            .map(|i| i.address)
+            .map(|i| i.public_key)
     }
 }
 
@@ -394,11 +402,12 @@ where
     Ok(first_value)
 }
 
-/// Startup-recovery probe: 200 → active address, 404 → no shard, anything else → error.
+/// Startup-recovery probe: 200 → active public key, 404 → no shard,
+/// anything else → error.
 pub async fn fetch_signer(
     http: &reqwest::Client,
     cosigner: &Url,
-) -> Result<Option<Address>, IpcError> {
+) -> Result<Option<PubkeySec1>, IpcError> {
     let url = cosigner
         .join("signer")
         .map_err(|e| IpcError::Http(format!("bad url: {e}")))?;
@@ -410,11 +419,11 @@ pub async fn fetch_signer(
     match resp.status() {
         StatusCode::NOT_FOUND => Ok(None),
         s if s.is_success() => {
-            let info: SignerInfo = resp
+            let info: PublicKeyInfo = resp
                 .json()
                 .await
                 .map_err(|e| IpcError::Http(e.to_string()))?;
-            Ok(Some(info.address))
+            Ok(Some(info.public_key))
         }
         s => Err(IpcError::Http(format!("GET /signer returned {s}"))),
     }

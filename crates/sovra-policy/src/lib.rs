@@ -2,6 +2,9 @@
 //! verdict comes out. No I/O and no TOML dependency — the cosigner reads the
 //! file and hands the string to serde — so evaluation is exhaustively
 //! unit-testable and the crate stays lean enough for an embedded build.
+//! The view is `sovra_network::TxView`, a network-tagged enum: `evaluate`
+//! matches on it exhaustively, so a new network cannot slip past policy —
+//! it fails to compile until this crate decides its rules.
 //!
 //! The grammar is fail-closed at every edge: every field is required and a
 //! misspelled key refuses to parse (`deny_unknown_fields`), an empty
@@ -12,16 +15,7 @@
 
 use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Deserializer};
-
-/// The policy-relevant slice of a decoded EIP-1559 transaction.
-#[derive(Debug, Clone, Copy)]
-pub struct TxView<'a> {
-    pub chain_id: u64,
-    /// `None` means contract creation (`TxKind::Create`).
-    pub to: Option<Address>,
-    pub value: U256,
-    pub data: &'a [u8],
-}
+pub use sovra_network::{EthTxView, TxView};
 
 /// The outcome of a policy evaluation. A deny carries the first violated
 /// rule; the cosigner maps it to a 403 and the orchestrator relays it.
@@ -90,6 +84,12 @@ pub struct Policy {
     #[serde(deserialize_with = "u256_from_dec_string")]
     pub max_value_wei: U256,
     pub allow_calldata: bool,
+    /// The one defaulted field: absent means `false`, so every policy file
+    /// written before this knob existed keeps denying creation unchanged.
+    /// Note creation carries init code in `data`, so allowing it in practice
+    /// also requires `allow_calldata = true`.
+    #[serde(default)]
+    pub allow_contract_creation: bool,
 }
 
 /// A TOML integer deserializes through i64 and caps at ~9.2 ETH in wei;
@@ -101,22 +101,35 @@ fn u256_from_dec_string<'de, D: Deserializer<'de>>(d: D) -> Result<U256, D::Erro
 }
 
 impl Policy {
-    /// Evaluate one decoded transaction against this policy. Fixed check
-    /// order (chain, destination shape, recipient, value, calldata) so the
-    /// reported reason is deterministic; the first violation wins.
-    pub fn evaluate(&self, tx: &TxView<'_>) -> Verdict {
+    /// Evaluate one decoded transaction against this policy. Exhaustive on
+    /// the network tag: a new network variant is a compile error here until
+    /// its rules exist.
+    pub fn evaluate(&self, view: &TxView<'_>) -> Verdict {
+        match view {
+            TxView::Ethereum(tx) => self.evaluate_ethereum(tx),
+        }
+    }
+
+    /// Fixed check order (chain, destination shape, recipient, value,
+    /// calldata) so the reported reason is deterministic; the first
+    /// violation wins.
+    fn evaluate_ethereum(&self, tx: &EthTxView<'_>) -> Verdict {
         if !self.allowed_chain_ids.contains(&tx.chain_id) {
             return Verdict::Deny(DenyReason::ChainId(tx.chain_id));
         }
-        // v1 has no contract-creation knob: `to = None` is always refused.
-        let Some(to) = tx.to else {
-            return Verdict::Deny(DenyReason::ContractCreation);
-        };
-        match &self.allowed_recipients {
-            Recipients::Any => {}
-            // An empty list falls through to Deny for every address.
-            Recipients::List(allowed) if allowed.contains(&to) => {}
-            Recipients::List(_) => return Verdict::Deny(DenyReason::Recipient(to)),
+        match tx.to {
+            // Creation has no recipient to allowlist — the knob is the
+            // whole decision (value ceiling and calldata still apply below).
+            None if !self.allow_contract_creation => {
+                return Verdict::Deny(DenyReason::ContractCreation);
+            }
+            None => {}
+            Some(to) => match &self.allowed_recipients {
+                Recipients::Any => {}
+                // An empty list falls through to Deny for every address.
+                Recipients::List(allowed) if allowed.contains(&to) => {}
+                Recipients::List(_) => return Verdict::Deny(DenyReason::Recipient(to)),
+            },
         }
         if tx.value > self.max_value_wei {
             return Verdict::Deny(DenyReason::ValueCeiling {
@@ -146,16 +159,17 @@ mod tests {
             allowed_recipients: Recipients::List(vec![RECIPIENT]),
             max_value_wei: U256::from(1_000_000u64),
             allow_calldata: false,
+            allow_contract_creation: false,
         }
     }
 
     fn tx(chain_id: u64, to: Option<Address>, value: u64, data: &'static [u8]) -> TxView<'static> {
-        TxView {
+        TxView::Ethereum(EthTxView {
             chain_id,
             to,
             value: U256::from(value),
             data,
-        }
+        })
     }
 
     #[test]
@@ -180,6 +194,23 @@ mod tests {
     fn denies_contract_creation() {
         let v = policy().evaluate(&tx(11155111, None, 1, &[]));
         assert_eq!(v, Verdict::Deny(DenyReason::ContractCreation));
+    }
+
+    #[test]
+    fn creation_knob_allows_creation() {
+        let mut p = policy();
+        p.allow_contract_creation = true;
+        p.allow_calldata = true; // init code travels in `data`
+        let v = p.evaluate(&tx(11155111, None, 1, b"\x60\x80"));
+        assert_eq!(v, Verdict::Allow);
+    }
+
+    #[test]
+    fn creation_still_subject_to_calldata_knob() {
+        let mut p = policy();
+        p.allow_contract_creation = true;
+        let v = p.evaluate(&tx(11155111, None, 1, b"\x60\x80"));
+        assert_eq!(v, Verdict::Deny(DenyReason::Calldata));
     }
 
     #[test]
@@ -295,6 +326,26 @@ mod tests {
             "#,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn absent_creation_knob_defaults_to_deny() {
+        // The pre-knob policy file grammar must keep parsing byte-for-byte,
+        // and keep refusing creation.
+        let p: Policy = toml::from_str(
+            r#"
+            allowed_chain_ids = [11155111]
+            allowed_recipients = ["*"]
+            max_value_wei = "1"
+            allow_calldata = true
+            "#,
+        )
+        .unwrap();
+        assert!(!p.allow_contract_creation);
+        assert_eq!(
+            p.evaluate(&tx(11155111, None, 1, b"\x01")),
+            Verdict::Deny(DenyReason::ContractCreation)
+        );
     }
 
     #[test]

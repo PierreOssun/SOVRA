@@ -22,7 +22,7 @@ use sovra_eth::encode_unsigned;
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
 use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
-use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, SignerId, SignerMetadata};
+use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, PubkeySec1, SignerId, SignerMetadata};
 use test_helpers::*;
 
 fn router_with(
@@ -66,7 +66,10 @@ async fn dkg_lifecycle() {
     // Provision.
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = json(&body)["address"].as_str().unwrap().to_string();
+    let address = json(&body)["addresses"]["ethereum"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // No rotation in the PoC.
     let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
@@ -74,7 +77,10 @@ async fn dkg_lifecycle() {
 
     let (status, body) = call(&router, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&body)["address"].as_str().unwrap(), address);
+    assert_eq!(
+        json(&body)["addresses"]["ethereum"].as_str().unwrap(),
+        address
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -84,7 +90,8 @@ async fn sign_flow_and_idempotency() {
 
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = Address::from_str(json(&body)["address"].as_str().unwrap()).unwrap();
+    let address =
+        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap();
 
     let (raw, expected_digest) = unsigned_tx(1_000_000_000u64);
     let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
@@ -99,7 +106,7 @@ async fn sign_flow_and_idempotency() {
         expected_digest.to_string()
     );
     assert_eq!(
-        Address::from_str(resp["recovered_address"].as_str().unwrap()).unwrap(),
+        Address::from_str(resp["signer_address"].as_str().unwrap()).unwrap(),
         address
     );
 
@@ -143,14 +150,20 @@ async fn restart_recovers_active_generation() {
     let router = test_router(d0.path(), d1.path());
     let (status, body) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = json(&body)["address"].as_str().unwrap().to_string();
+    let address = json(&body)["addresses"]["ethereum"]
+        .as_str()
+        .unwrap()
+        .to_string();
     drop(router);
 
     // "Restart": a fresh AppState over the same store dirs.
     let router = test_router(d0.path(), d1.path());
     let (status, body) = call(&router, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&body)["address"].as_str().unwrap(), address);
+    assert_eq!(
+        json(&body)["addresses"]["ethereum"].as_str().unwrap(),
+        address
+    );
 
     // The reloaded shards actually sign.
     let (raw, _) = unsigned_tx(1_000_000_000u64);
@@ -180,7 +193,11 @@ fn recover_rejects_metadata_without_shard() {
 
     let meta = SignerMetadata {
         signer_id: SignerId::new(ACTIVE_SIGNER_ID),
-        address: Address::from([0xaa; 20]),
+        public_key: {
+            let mut b = [0xaa; 33];
+            b[0] = 0x02;
+            PubkeySec1::from_slice(&b).unwrap()
+        },
     };
     let shard = KeyShare::from(vec![1, 2, 3]);
     stores[0].save_shard(&meta, &shard).unwrap();
@@ -206,7 +223,7 @@ async fn sign_rejects_invalid_tx_invariants() {
         to: TxKind::Call(Address::from([0x11; 20])),
         ..Default::default()
     };
-    let body = serde_json::json!({ "unsigned_transaction": encode_unsigned(&tx).to_string() });
+    let body = serde_json::json!({ "unsigned_transaction": encode_unsigned(&sovra_eth::EthTx::Eip1559(tx)).to_string() });
     let (status, resp) = call(&router, post_json("/v1/sign", body)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -261,18 +278,24 @@ async fn recover_requires_dkg_then_preserves_address_and_signs() {
 
     let (status, resp) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    let address = json(&resp)["address"].as_str().unwrap().to_string();
+    let address = json(&resp)["addresses"]["ethereum"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let (status, resp) = call(&router, post_json("/v1/recover", body)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&resp)["address"].as_str().unwrap(), address);
+    assert_eq!(
+        json(&resp)["addresses"]["ethereum"].as_str().unwrap(),
+        address
+    );
 
     // The refreshed generation signs.
     let (raw, _) = unsigned_tx(1_000_000_000u64);
     let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
     let (status, resp) = call(&router, post_json("/v1/sign", req)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json(&resp)["recovered_address"].as_str().unwrap(), address);
+    assert_eq!(json(&resp)["signer_address"].as_str().unwrap(), address);
 }
 
 /// A t == n scheme has no redundancy: /v1/recover over the standard 2-of-2
@@ -301,14 +324,18 @@ async fn recover_refuses_schemes_without_redundancy() {
 struct SlowBackend(InProcessBackend);
 
 impl MpcBackend for SlowBackend {
-    async fn dkg(&self) -> Result<Address, MpcError> {
+    async fn dkg(&self) -> Result<PubkeySec1, MpcError> {
         self.0.dkg().await
     }
-    async fn sign(&self, unsigned_tx: &[u8]) -> Result<EcdsaParts, MpcError> {
+    async fn sign(
+        &self,
+        network: sovra_types::NetworkId,
+        unsigned_tx: &[u8],
+    ) -> Result<Vec<EcdsaParts>, MpcError> {
         tokio::time::sleep(Duration::from_millis(300)).await; // widen the race window
-        self.0.sign(unsigned_tx).await
+        self.0.sign(network, unsigned_tx).await
     }
-    async fn refresh(&self, lost_party: u8) -> Result<Address, MpcError> {
+    async fn refresh(&self, lost_party: u8) -> Result<PubkeySec1, MpcError> {
         self.0.refresh(lost_party).await
     }
 }

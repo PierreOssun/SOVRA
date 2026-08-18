@@ -13,7 +13,6 @@
 
 use std::time::Duration;
 
-use alloy_primitives::Address;
 use alloy_provider::Provider;
 use axum::{Router, response::Response, routing::post};
 use sovra_eth::http_provider;
@@ -59,8 +58,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Bounded retry: cosigners start first (RUN.md), but give them ~10s of grace.
     let probe = tls.http_client(Duration::from_secs(5))?;
     let active = recover_with_retry(&probe, &cosigners, threshold).await?;
-    if let Some(address) = active {
-        tracing::info!(%address, "recovered active dkg generation");
+    if let Some(public_key) = active {
+        tracing::info!(%public_key, "recovered active dkg generation");
     }
 
     let state = AppState::new(provider, backend, active);
@@ -113,7 +112,7 @@ async fn recover_with_retry(
     http: &reqwest::Client,
     cosigners: &[(u8, Url)],
     threshold: usize,
-) -> Result<Option<Address>, RecoverError> {
+) -> Result<Option<sovra_types::PubkeySec1>, RecoverError> {
     for _ in 0..9 {
         match orchestrator::recover_active(http, cosigners, threshold).await {
             Err(e @ RecoverError::Transport { .. }) => {

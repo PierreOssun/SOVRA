@@ -11,9 +11,10 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use alloy_provider::DynProvider;
 use sovra_mpc::MpcBackend;
+use sovra_types::PubkeySec1;
 
 use crate::api::SignResponse;
 
@@ -55,7 +56,7 @@ impl<B> Clone for AppState<B> {
 }
 
 impl<B: MpcBackend> AppState<B> {
-    pub fn new(provider: DynProvider, backend: B, active: Option<Address>) -> Self {
+    pub fn new(provider: DynProvider, backend: B, active: Option<PubkeySec1>) -> Self {
         Self {
             provider,
             backend: Arc::new(backend),
@@ -80,9 +81,9 @@ pub struct SignerCell {
 }
 
 pub struct SignerState {
-    /// Address of the active DKG generation. `None` until DKG runs;
+    /// Public key of the active DKG generation. `None` until DKG runs;
     /// recovered from the shard stores at startup.
-    pub active: Option<Address>,
+    pub active: Option<PubkeySec1>,
     /// Idempotency cache: completed sign responses keyed by tx_digest.
     /// In-memory only — lost on restart (a re-sign then re-runs MPC).
     pub signed: HashMap<B256, SignResponse>,

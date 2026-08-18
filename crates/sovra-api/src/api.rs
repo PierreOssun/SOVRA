@@ -14,14 +14,18 @@
 //! Pattern: thin controllers over the `MpcBackend` port; wire DTOs kept
 //! separate from domain types.
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use sovra_eth::{
-    BroadcastOutcome, PreparedTx, TxRequest, broadcast_via_rpc, decode_signed, decode_unsigned,
-    encode_unsigned, finalize, prepare::validate_unsigned, prepare_from_rpc,
+    AccessList, BroadcastOutcome, EthTxType, PreparedTx, TxRequest, address_from_sec1,
+    broadcast_via_rpc, decode_signed, encode_unsigned, prepare_from_rpc,
 };
 use sovra_mpc::MpcBackend;
+use sovra_network::Network;
+use sovra_types::{NetworkId, PubkeySec1};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::{errors::ApiError, state::AppState};
@@ -31,24 +35,31 @@ pub async fn prepare<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
     Json(body): Json<PrepareRequest>,
 ) -> Result<Json<PrepareResponse>, ApiError> {
-    let from = state
+    // Enrichment I/O is deliberately outside the Network trait (fee
+    // estimation and UTXO selection don't share a shape) — a new network
+    // adds its own concrete arm here.
+    let NetworkId::Ethereum = body.network;
+    let active = state
         .signer
         .state
         .read()
         .unwrap()
         .active
         .ok_or(ApiError::DkgNotInitialized)?;
+    let from = address_from_sec1(&active)?;
 
-    tracing::info!(%from, to = %body.to, value = %body.value, "prepare request");
+    tracing::info!(%from, to = ?body.to, value = %body.value, tx_type = ?body.tx_type, "prepare request");
 
     let req = TxRequest {
         to: body.to,
         value: body.value,
         data: body.data,
+        tx_type: body.tx_type,
+        access_list: body.access_list,
     };
     let PreparedTx { tx, signing_hash } = prepare_from_rpc(req, from, &state.provider).await?;
 
-    tracing::info!(tx_digest = %signing_hash, nonce = tx.nonce, "prepare ok");
+    tracing::info!(tx_digest = %signing_hash, nonce = tx.nonce(), "prepare ok");
 
     Ok(Json(PrepareResponse {
         from,
@@ -71,17 +82,17 @@ pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
         return Err(ApiError::DkgAlreadyInitialized);
     }
 
-    let address = state.backend.dkg().await?;
-    state.signer.state.write().unwrap().active = Some(address);
+    let public_key = state.backend.dkg().await?;
+    state.signer.state.write().unwrap().active = Some(public_key);
 
-    tracing::info!(%address, "dkg complete");
-    Ok(Json(DkgResponse { address }))
+    tracing::info!(%public_key, "dkg complete");
+    DkgResponse::new(public_key).map(Json)
 }
 
 /// Operator endpoint: the recovery re-share ceremony. All n cosigners
 /// (including the normally-cold recovery party) must be online; the
 /// declared-lost party rebuilds its shard from scratch, every other shard
-/// re-randomizes, and the address must come back unchanged — a different
+/// re-randomizes, and the public key must come back unchanged — a different
 /// one is a broken invariant, not a result.
 #[utoipa::path(post, path = "/v1/recover", request_body = RecoverRequest)]
 pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
@@ -102,15 +113,15 @@ pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
         .active
         .ok_or(ApiError::DkgNotInitialized)?;
 
-    let address = state.backend.refresh(body.lost_party).await?;
-    if address != active {
+    let public_key = state.backend.refresh(body.lost_party).await?;
+    if public_key != active {
         return Err(ApiError::Mpc(sovra_mpc::MpcError::PartyMismatch(format!(
-            "refresh returned {address}, active generation is {active}"
+            "refresh returned {public_key}, active generation is {active}"
         ))));
     }
 
-    tracing::info!(%address, lost_party = body.lost_party, "recovery re-share complete");
-    Ok(Json(DkgResponse { address }))
+    tracing::info!(%public_key, lost_party = body.lost_party, "recovery re-share complete");
+    DkgResponse::new(public_key).map(Json)
 }
 
 #[utoipa::path(get, path = "/v1/dkg")]
@@ -118,19 +129,35 @@ pub async fn dkg_get<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
 ) -> Result<Json<DkgResponse>, ApiError> {
     let active = state.signer.state.read().unwrap().active;
-    active
-        .map(|address| Json(DkgResponse { address }))
-        .ok_or(ApiError::DkgNotFound)
+    let public_key = active.ok_or(ApiError::DkgNotFound)?;
+    DkgResponse::new(public_key).map(Json)
 }
 #[utoipa::path(post, path = "/v1/sign", request_body = SignRequest)]
 pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
     Json(body): Json<SignRequest>,
 ) -> Result<Json<SignResponse>, ApiError> {
-    // 1. Decode + recompute the digest. Never trust a caller-supplied hash.
-    let prepared = decode_unsigned(&body.unsigned_transaction)?;
-    validate_unsigned(&prepared.tx)?;
-    let tx_digest = prepared.signing_hash;
+    // The one dispatch point: the tag picks the Network impl, everything
+    // below is generic. A new network is a new arm here (and the compiler
+    // holds the door until it exists).
+    match body.network {
+        NetworkId::Ethereum => {
+            sign_via::<sovra_eth::Ethereum, B>(&state, &body.unsigned_transaction).await
+        }
+    }
+}
+
+async fn sign_via<N: Network, B: MpcBackend + Send + Sync + 'static>(
+    state: &AppState<B>,
+    unsigned: &Bytes,
+) -> Result<Json<SignResponse>, ApiError> {
+    // 1. Decode + recompute the digests. Never trust a caller-supplied hash.
+    let tx = N::decode_unsigned(unsigned)?;
+    N::validate(&tx)?;
+    let digests = N::signing_digests(&tx);
+    // Idempotency key: the first digest. Fine while every network signs one
+    // digest; a multi-digest network should key on a hash of the full list.
+    let tx_digest = B256::from(digests[0]);
 
     // 2. Idempotency + readiness in one short read.
     let active = {
@@ -156,19 +183,24 @@ pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
         return Ok(Json(cached.clone()));
     }
 
-    let parts = state.backend.sign(&body.unsigned_transaction).await?;
+    let parts = state.backend.sign(N::ID, unsigned).await?;
 
-    // Load-bearing safety check: recovered signer must be the active address.
-    let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, active)?;
+    // Load-bearing safety check, inside the impl: finalize verifies every
+    // recovered signer against the active key before emitting bytes.
+    let signed = N::finalize(tx, &parts, &active)?;
 
     let response = SignResponse {
+        network: N::ID,
         signed_transaction: signed.raw,
-        signature: SignatureParts {
-            r: parts.r,
-            s: parts.s,
-            y_parity: parts.y_parity,
-        },
-        recovered_address: signed.from,
+        signatures: parts
+            .iter()
+            .map(|p| SignatureParts {
+                r: p.r,
+                s: p.s,
+                y_parity: p.y_parity,
+            })
+            .collect(),
+        signer_address: N::derive_address(&active)?,
         tx_digest,
     };
     state
@@ -179,19 +211,34 @@ pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
         .signed
         .insert(tx_digest, response.clone());
 
-    tracing::info!(%tx_digest, address = %signed.from, "sign complete");
+    tracing::info!(%tx_digest, signer = %response.signer_address, "sign complete");
     Ok(Json(response))
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct PrepareRequest {
-    #[schema(value_type = String)]
-    to: Address,
+    /// Absent means "ethereum" — existing callers keep working.
+    #[serde(default)]
+    #[schema(value_type = String, example = "ethereum")]
+    network: NetworkId,
+    /// Omit (or null) to request contract creation — `data` is the init
+    /// code and the cosigners' policies must allow creation.
+    #[schema(value_type = Option<String>)]
+    to: Option<Address>,
     #[schema(value_type = String, example = "0")]
     value: U256,
     #[serde(default)]
     #[schema(value_type = String)]
     data: Bytes,
+    /// "legacy" | "eip2930" | "eip1559" (default).
+    #[serde(default)]
+    #[schema(value_type = String, example = "eip1559")]
+    tx_type: EthTxType,
+    /// EIP-2930 access list; rejected for legacy. Entries:
+    /// `{ "address": "0x…", "storageKeys": ["0x…"] }`.
+    #[serde(default)]
+    #[schema(value_type = Vec<Object>)]
+    access_list: AccessList,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -215,11 +262,15 @@ pub struct SignatureParts {
 
 #[derive(Clone, Serialize, ToSchema)]
 pub struct SignResponse {
+    #[schema(value_type = String, example = "ethereum")]
+    pub network: NetworkId,
     #[schema(value_type = String)]
     pub signed_transaction: Bytes,
-    pub signature: SignatureParts,
-    #[schema(value_type = String)]
-    pub recovered_address: Address,
+    /// One per digest the network defines (Ethereum: exactly one).
+    pub signatures: Vec<SignatureParts>,
+    /// The active key's address on `network`, verified against the
+    /// signature(s) during finalize.
+    pub signer_address: String,
     #[schema(value_type = String)]
     pub tx_digest: B256,
 }
@@ -239,6 +290,8 @@ pub async fn broadcast<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
     Json(body): Json<BroadcastRequest>,
 ) -> Result<(StatusCode, Json<BroadcastResponse>), ApiError> {
+    // Broadcast I/O stays per-network concrete, like prepare's enrichment.
+    let NetworkId::Ethereum = body.network;
     // Cheap in-memory guard first: nothing works before DKG, regardless of
     // payload (same 409 semantics as prepare), and no caller bytes are
     // parsed before it passes.
@@ -254,6 +307,7 @@ pub async fn broadcast<B: MpcBackend + Send + Sync + 'static>(
     // word is never taken for the hash or the sender, and the orchestrator
     // only relays transactions produced by its own signer (not an open relay).
     let decoded = decode_signed(&body.signed_transaction)?;
+    let active = address_from_sec1(&active)?;
     if decoded.from != active {
         return Err(ApiError::BroadcastSignerMismatch {
             recovered: decoded.from,
@@ -301,19 +355,47 @@ pub async fn broadcast<B: MpcBackend + Send + Sync + 'static>(
 
 #[derive(Serialize, ToSchema)]
 pub struct DkgResponse {
+    /// The chain-neutral key identity (33-byte compressed SEC1, hex).
     #[schema(value_type = String)]
-    pub address: Address,
+    pub public_key: PubkeySec1,
+    /// Per-network display addresses derived from `public_key`.
+    #[schema(value_type = Object)]
+    pub addresses: BTreeMap<NetworkId, String>,
+}
+
+impl DkgResponse {
+    fn new(public_key: PubkeySec1) -> Result<Self, ApiError> {
+        // {:#x} = lowercase hex, matching how serde renders every other
+        // Address field in this API (Display would be EIP-55 checksummed).
+        let addresses = BTreeMap::from([(
+            NetworkId::Ethereum,
+            format!("{:#x}", address_from_sec1(&public_key)?),
+        )]);
+        Ok(Self {
+            public_key,
+            addresses,
+        })
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct SignRequest {
+    /// Absent means "ethereum" — existing callers keep working.
+    #[serde(default)]
+    #[schema(value_type = String, example = "ethereum")]
+    network: NetworkId,
     #[schema(value_type = String)]
     unsigned_transaction: Bytes,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct BroadcastRequest {
-    /// 0x02-prefixed signed EIP-2718 bytes, as returned by `/v1/sign`.
+    /// Absent means "ethereum" — existing callers keep working.
+    #[serde(default)]
+    #[schema(value_type = String, example = "ethereum")]
+    network: NetworkId,
+    /// Signed EIP-2718 bytes as returned by `/v1/sign` (0x01/0x02-prefixed,
+    /// or a bare RLP list for legacy).
     #[schema(value_type = String)]
     signed_transaction: Bytes,
 }

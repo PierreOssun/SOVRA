@@ -2,7 +2,7 @@ use alloy_consensus::SignableTransaction;
 use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_provider::Provider;
 use config::{Config, File};
-use sovra_eth::{PreparedTx, TxRequest, http_provider, prepare_from_rpc};
+use sovra_eth::{EthTx, PreparedTx, TxRequest, http_provider, prepare_from_rpc};
 
 const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
 
@@ -29,14 +29,19 @@ async fn prepare_matches_live_sepolia() {
     let provider = http_provider(&rpc_url()).expect("valid RPC URL");
 
     let req = TxRequest {
-        to: ACCOUNT_2,
+        to: Some(ACCOUNT_2),
         value: U256::ZERO,
         data: Bytes::new(),
+        tx_type: Default::default(), // eip1559
+        access_list: Default::default(),
     };
 
     let PreparedTx { tx, signing_hash } = prepare_from_rpc(req, ACCOUNT_1, &provider)
         .await
         .expect("prepare should succeed");
+    let EthTx::Eip1559(tx) = &tx else {
+        panic!("default tx_type must prepare an EIP-1559 tx");
+    };
 
     // chain_id matches the RPC and is Sepolia.
     let rpc_chain_id = provider.get_chain_id().await.expect("get_chain_id");

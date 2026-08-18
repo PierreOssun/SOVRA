@@ -1,4 +1,5 @@
-use sovra_eth::{TxIntent, encode_unsigned, finalize, prepare};
+use alloy_primitives::TxKind;
+use sovra_eth::{TxIntent, TxParams, encode_unsigned, finalize, prepare};
 use sovra_mpc::MpcBackend;
 use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
@@ -7,12 +8,15 @@ fn base_intent() -> TxIntent {
     TxIntent {
         chain_id: 11155111,
         nonce: 0,
-        to: Default::default(),
+        kind: TxKind::Call(Default::default()),
         value: Default::default(),
         gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
         data: Default::default(),
+        params: TxParams::Eip1559 {
+            max_fee_per_gas: 3,
+            max_priority_fee_per_gas: 2,
+            access_list: Default::default(),
+        },
     }
 }
 
@@ -27,14 +31,21 @@ async fn dkg_sign_finalize_roundtrip() {
         2,
     );
 
-    let address = backend.dkg().await.expect("dkg");
+    let public_key = backend.dkg().await.expect("dkg");
+    let address = sovra_eth::address_from_sec1(&public_key).expect("derive address");
 
     let prepared = prepare(base_intent()).expect("prepare");
 
-    let parts = backend
-        .sign(&encode_unsigned(&prepared.tx))
+    let signatures = backend
+        .sign(
+            sovra_types::NetworkId::Ethereum,
+            &encode_unsigned(&prepared.tx),
+        )
         .await
         .expect("sign");
+    let [parts] = signatures.as_slice() else {
+        panic!("ethereum signs exactly one digest");
+    };
 
     let signed = finalize(prepared, parts.r, parts.s, parts.y_parity, address).expect("finalize");
 

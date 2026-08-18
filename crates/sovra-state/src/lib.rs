@@ -2,7 +2,8 @@
 //! plus public metadata (`metadata.json`) per signer id, under
 //! `<root>/<signer_id>/`.
 //!
-//! Why this shape: metadata is plaintext JSON because the address is public;
+//! Why this shape: metadata is plaintext JSON because the public key is
+//! public;
 //! shard bytes route through the [`ShardSealer`] seam (identity `Passthrough`
 //! today, encryption later) so at-rest protection can change without touching
 //! callers. All writes are atomic (temp file + rename) with 0600/0700 modes,
@@ -19,8 +20,7 @@ mod types;
 
 use std::path::{Path, PathBuf};
 
-use alloy_primitives::Address;
-use sovra_types::{KeyShare, SignerId, SignerMetadata};
+use sovra_types::{KeyShare, PubkeySec1, SignerId, SignerMetadata};
 pub use types::*;
 
 const METADATA_FILE: &str = "metadata.json";
@@ -71,7 +71,7 @@ impl SignerStore {
         std::fs::create_dir_all(&dir).at(&dir)?;
         set_mode(&dir, 0o700)?;
 
-        // Metadata: plaintext JSON (the address is public).
+        // Metadata: plaintext JSON (the public key is public).
         let meta_bytes = serde_json::to_vec_pretty(meta)?;
         write_atomic(&dir.join(METADATA_FILE), &meta_bytes)?;
 
@@ -96,9 +96,9 @@ impl SignerStore {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Find the signer whose stored metadata matches `address`.
+    /// Find the signer whose stored metadata matches `public_key`.
     /// Scans the per-signer metadata files; first match wins.
-    pub fn find_by_address(&self, address: &Address) -> Result<SignerId, StateError> {
+    pub fn find_by_public_key(&self, public_key: &PubkeySec1) -> Result<SignerId, StateError> {
         let entries = std::fs::read_dir(&self.root).at(&self.root)?;
 
         for entry in entries {
@@ -118,26 +118,27 @@ impl SignerStore {
             };
 
             let meta: SignerMetadata = serde_json::from_slice(&bytes)?;
-            if &meta.address == address {
+            if &meta.public_key == public_key {
                 return Ok(meta.signer_id);
             }
         }
 
-        Err(StateError::AddressNotFound(*address))
+        Err(StateError::PubkeyNotFound(*public_key))
     }
 
-    /// Address of a FULLY persisted generation: metadata and shard must both exist.
-    /// save_shard writes metadata before the shard, so a crash between the two
-    /// leaves metadata-only — that half-state is an error, not a generation.
-    pub fn load_active(&self, id: &SignerId) -> Result<Option<Address>, StateError> {
+    /// Public key of a FULLY persisted generation: metadata and shard must both
+    /// exist. save_shard writes metadata before the shard, so a crash between
+    /// the two leaves metadata-only — that half-state is an error, not a
+    /// generation.
+    pub fn load_active(&self, id: &SignerId) -> Result<Option<PubkeySec1>, StateError> {
         let meta = match self.load_metadata(id) {
             Ok(meta) => meta,
             Err(StateError::NotFound(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
         match self.load_shard(id) {
-            Ok(_) => Ok(Some(meta.address)),
-            Err(StateError::NotFound(_)) => Err(StateError::PartialState(meta.address)),
+            Ok(_) => Ok(Some(meta.public_key)),
+            Err(StateError::NotFound(_)) => Err(StateError::PartialState(meta.public_key)),
             Err(e) => Err(e),
         }
     }

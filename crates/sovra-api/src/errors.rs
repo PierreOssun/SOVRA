@@ -14,8 +14,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use sovra_eth::{BroadcastError, DecodeError, FinalizeError, PrepareError};
+use sovra_eth::{BroadcastError, DecodeError, FinalizeError, PrepareError, PubkeyError};
 use sovra_mpc::MpcError;
+use sovra_network::TxError;
 use sovra_state::StateError;
 use thiserror::Error;
 
@@ -26,6 +27,11 @@ pub enum ApiError {
 
     #[error("invalid transaction bytes: {0}")]
     InvalidTxBytes(#[from] DecodeError),
+
+    /// The network-generic pipeline's error: the variant carries the HTTP
+    /// class (Decode/Validate = caller, Finalize/Pubkey = invariant).
+    #[error(transparent)]
+    Tx(#[from] TxError),
 
     #[error("dkg already initialized")]
     DkgAlreadyInitialized,
@@ -48,6 +54,11 @@ pub enum ApiError {
     #[error(transparent)]
     Finalize(#[from] FinalizeError),
 
+    /// The stored/agreed pubkey fails point decoding — a broken invariant
+    /// (the MPC layer only ever emits valid keys), never a caller mistake.
+    #[error(transparent)]
+    Pubkey(#[from] PubkeyError),
+
     #[error(transparent)]
     Broadcast(#[from] BroadcastError),
 
@@ -61,9 +72,19 @@ impl IntoResponse for ApiError {
             ApiError::Prepare(PrepareError::Enrich(_)) => {
                 (StatusCode::BAD_GATEWAY, "rpc enrichment failed".to_string())
             }
-            ApiError::Prepare(_) | ApiError::InvalidTxBytes(_) => {
+            ApiError::Prepare(_)
+            | ApiError::InvalidTxBytes(_)
+            | ApiError::Tx(TxError::Decode(_) | TxError::Validate(_)) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
+            ApiError::Tx(TxError::Finalize(_)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "signature verification failed".to_string(),
+            ),
+            ApiError::Tx(TxError::Pubkey(_)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "active public key is invalid".to_string(),
+            ),
 
             ApiError::DkgAlreadyInitialized
             | ApiError::DkgNotInitialized
@@ -89,6 +110,10 @@ impl IntoResponse for ApiError {
             ApiError::Finalize(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "signature verification failed".to_string(),
+            ),
+            ApiError::Pubkey(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "active public key is invalid".to_string(),
             ),
 
             // The node's rejection reason is about the caller's tx ("nonce

@@ -9,6 +9,7 @@ config = "0.15"
 serde = { version = "1", features = ["derive"] }
 sovra-eth = { workspace = true }
 sovra-ipc = { workspace = true }
+sovra-network = { workspace = true }
 sovra-policy = { workspace = true }
 toml = { workspace = true }
 sovra-mpc = { workspace = true }

@@ -54,6 +54,7 @@ fn permissive_policy() -> sovra_policy::Policy {
         allowed_recipients: sovra_policy::Recipients::Any,
         max_value_wei: U256::MAX,
         allow_calldata: false,
+        allow_contract_creation: false,
     }
 }
 
@@ -98,12 +99,15 @@ fn unsigned_tx_bytes() -> Bytes {
     let prepared = sovra_eth::prepare(sovra_eth::TxIntent {
         chain_id: 11155111,
         nonce: 0,
-        to: Address::repeat_byte(0x11),
+        kind: alloy_primitives::TxKind::Call(Address::repeat_byte(0x11)),
         value: U256::from(1u64),
         gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
         data: Bytes::new(),
+        params: sovra_eth::TxParams::Eip1559 {
+            max_fee_per_gas: 3,
+            max_priority_fee_per_gas: 2,
+            access_list: Default::default(),
+        },
     })
     .unwrap();
     sovra_eth::encode_unsigned(&prepared.tx)
@@ -129,13 +133,14 @@ async fn joint_dkg_then_sign() {
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(a.status(), StatusCode::OK);
     assert_eq!(b.status(), StatusCode::OK);
-    let (i0, i1): (SignerInfo, SignerInfo) = (json_body(a).await, json_body(b).await);
-    assert_eq!(i0.address, i1.address);
+    let (i0, i1): (PublicKeyInfo, PublicKeyInfo) = (json_body(a).await, json_body(b).await);
+    assert_eq!(i0.public_key, i1.public_key);
 
     // sign: fresh instance, same unsigned tx bytes, concurrently -> identical
     // SignParts (each party decodes and re-derives the digest itself)
     let sign = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
+        network: sovra_types::NetworkId::Ethereum,
         unsigned_transaction: unsigned_tx_bytes(),
         participants: vec![0, 1],
     };
@@ -143,9 +148,10 @@ async fn joint_dkg_then_sign() {
         r0.clone().oneshot(post_json("/sign", &sign)),
         r1.clone().oneshot(post_json("/sign", &sign)),
     );
-    let (p0, p1): (SignParts, SignParts) =
+    let (p0, p1): (SignaturesInfo, SignaturesInfo) =
         (json_body(a.unwrap()).await, json_body(b.unwrap()).await);
     assert_eq!(p0, p1);
+    assert_eq!(p0.signatures.len(), 1, "ethereum signs one digest");
 
     // second dkg on either party -> 409
     let dkg2 = StartDkgRequest {
@@ -169,6 +175,7 @@ async fn sign_rejects_undecodable_bytes_before_any_mpc() {
 
     let garbage = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
+        network: sovra_types::NetworkId::Ethereum,
         unsigned_transaction: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
         participants: vec![0, 1],
     };
@@ -215,6 +222,7 @@ async fn sign_denied_by_policy_before_any_mpc() {
 
     let req = StartSignRequest {
         instance: B256::from(rand::random::<[u8; 32]>()),
+        network: sovra_types::NetworkId::Ethereum,
         unsigned_transaction: unsigned_tx_bytes(),
         participants: vec![0, 1],
     };

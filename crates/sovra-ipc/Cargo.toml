@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 sovra-mpc = { workspace = true }
+sovra-types = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 # rustls-tls-webpki-roots is the only public route to Connector::Rustls; the
 # webpki roots it pulls go unused — WsRelay always passes an explicit connector.

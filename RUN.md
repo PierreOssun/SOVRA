@@ -59,7 +59,7 @@ Treat a lost shard as compromised: run the ceremony promptly.
    ```bash
    curl -s -X POST http://127.0.0.1:3000/v1/recover \
      -H 'content-type: application/json' -d '{ "lost_party": 1 }'
-   # → { "address": "0x…" }   ← MUST equal the existing signer address
+   # → { "public_key": "0x02…", "addresses": { … } }   ← public_key MUST equal the existing one
    ```
 
 4. **Verify and stand down.** Sign something (`sovra-cli sign`), confirm the
@@ -123,7 +123,8 @@ with `sovra-cli` from another terminal (all commands default to
 # Show the active signer address (independently verify the DKG output)
 curl -s http://127.0.0.1:3000/v1/dkg
 
-# Build an unsigned EIP-1559 tx from intent (from = the DKG address).
+# Build an unsigned tx from intent (from = the DKG key's Ethereum address);
+# tx_type: "legacy" | "eip2930" | "eip1559" (default).
 # --value 0 works on a freshly created (unfunded) signer — see the funding note below.
 cargo run -p sovra-cli -- prepare \
   --to 0x000000000000000000000000000000000000dEaD \
@@ -132,7 +133,7 @@ cargo run -p sovra-cli -- prepare \
 
 # Sign it — the selected pair of cosigners runs the DKLs23 rounds P2P
 cargo run -p sovra-cli -- sign --tx 0x02...
-# → { "signed_transaction": "0x02..", "signature": { r, s, y_parity }, ... }
+# → { "network": "ethereum", "signed_transaction": "0x02..", "signatures": [{ r, s, y_parity }], "signer_address": "0x…", ... }
 
 # Broadcast it — submits to Sepolia via the RPC node, waits up to 30 s for a receipt
 cargo run -p sovra-cli -- broadcast --tx 0x02...

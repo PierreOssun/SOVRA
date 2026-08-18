@@ -7,7 +7,6 @@
 //! `TxEnvelope`/EIP-2718 path so the raw bytes and tx hash are exactly what
 //! the network computes. Pattern: pure function, validate-then-construct.
 
-use alloy_consensus::{SignableTransaction, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Signature, U256};
 
@@ -34,16 +33,15 @@ pub fn finalize_impl(
         });
     }
 
-    // attach the signature to the unsigned tx
-    let signed = prepared_tx.tx.into_signed(signature);
+    // attach the signature and wrap in alloy's envelope; for legacy, alloy
+    // derives the EIP-155 v from the tx's chain id here
+    let envelope = prepared_tx.tx.into_envelope(signature);
 
     // the on-chain tx id (keccak of the signed bytes)
-    let tx_hash = *signed.hash();
+    let tx_hash = *envelope.tx_hash();
 
-    // alloy's enum over every typed-tx kind
-    let envelope = TxEnvelope::from(signed);
-
-    // serialize to raw EIP-2718 bytes (0x02…) for eth_sendRawTransaction
+    // serialize to raw EIP-2718 bytes (legacy = bare RLP) for
+    // eth_sendRawTransaction
     let raw = envelope.encoded_2718().into();
 
     tracing::info!(tx_hash = %tx_hash, from = %recovered, "tx finalized");

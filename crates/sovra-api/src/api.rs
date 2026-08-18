@@ -18,8 +18,9 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use sovra_eth::{
-    BroadcastOutcome, PreparedTx, TxRequest, broadcast_via_rpc, decode_signed, decode_unsigned,
-    encode_unsigned, finalize, prepare::validate_unsigned, prepare_from_rpc,
+    AccessList, BroadcastOutcome, EthTxType, PreparedTx, TxRequest, broadcast_via_rpc,
+    decode_signed, decode_unsigned, encode_unsigned, finalize, prepare::validate_unsigned,
+    prepare_from_rpc,
 };
 use sovra_mpc::MpcBackend;
 use utoipa::{OpenApi, ToSchema};
@@ -39,16 +40,18 @@ pub async fn prepare<B: MpcBackend + Send + Sync + 'static>(
         .active
         .ok_or(ApiError::DkgNotInitialized)?;
 
-    tracing::info!(%from, to = %body.to, value = %body.value, "prepare request");
+    tracing::info!(%from, to = ?body.to, value = %body.value, tx_type = ?body.tx_type, "prepare request");
 
     let req = TxRequest {
         to: body.to,
         value: body.value,
         data: body.data,
+        tx_type: body.tx_type,
+        access_list: body.access_list,
     };
     let PreparedTx { tx, signing_hash } = prepare_from_rpc(req, from, &state.provider).await?;
 
-    tracing::info!(tx_digest = %signing_hash, nonce = tx.nonce, "prepare ok");
+    tracing::info!(tx_digest = %signing_hash, nonce = tx.nonce(), "prepare ok");
 
     Ok(Json(PrepareResponse {
         from,
@@ -185,13 +188,24 @@ pub async fn sign<B: MpcBackend + Send + Sync + 'static>(
 
 #[derive(Deserialize, ToSchema)]
 pub struct PrepareRequest {
-    #[schema(value_type = String)]
-    to: Address,
+    /// Omit (or null) to request contract creation — `data` is the init
+    /// code and the cosigners' policies must allow creation.
+    #[schema(value_type = Option<String>)]
+    to: Option<Address>,
     #[schema(value_type = String, example = "0")]
     value: U256,
     #[serde(default)]
     #[schema(value_type = String)]
     data: Bytes,
+    /// "legacy" | "eip2930" | "eip1559" (default).
+    #[serde(default)]
+    #[schema(value_type = String, example = "eip1559")]
+    tx_type: EthTxType,
+    /// EIP-2930 access list; rejected for legacy. Entries:
+    /// `{ "address": "0x…", "storageKeys": ["0x…"] }`.
+    #[serde(default)]
+    #[schema(value_type = Vec<Object>)]
+    access_list: AccessList,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -313,7 +327,8 @@ pub struct SignRequest {
 
 #[derive(Deserialize, ToSchema)]
 pub struct BroadcastRequest {
-    /// 0x02-prefixed signed EIP-2718 bytes, as returned by `/v1/sign`.
+    /// Signed EIP-2718 bytes as returned by `/v1/sign` (0x01/0x02-prefixed,
+    /// or a bare RLP list for legacy).
     #[schema(value_type = String)]
     signed_transaction: Bytes,
 }

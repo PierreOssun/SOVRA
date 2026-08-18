@@ -11,7 +11,8 @@
 //! cosigner forever (a bug the split_flow gate test caught).
 //! `/sign` receives the unsigned tx *preimage*, never a digest: it decodes
 //! and validates the bytes and derives the signing hash itself, so this
-//! party can only ever sign well-formed EIP-1559 transactions it inspected.
+//! party can only ever sign well-formed transactions of a supported type
+//! (legacy/EIP-2930/EIP-1559) it inspected.
 //! Pattern: thin controllers delegating to `sovra-mpc-dkls23-silence`
 //! runners; wire types come from `sovra_ipc::control`.
 
@@ -100,11 +101,13 @@ pub async fn sign(
     // dialed, there is no session to clean up, and the op lock frees on
     // return. The verdict logs (allow AND deny, digest + correlation id via
     // the request span) are the future signature-receipt data source.
+    // `chain_id` is Some past validate_unsigned; the 0 fallback would only
+    // ever deny (no policy allowlists chain 0) — fail-closed either way.
     let view = TxView {
-        chain_id: prepared.tx.chain_id,
-        to: prepared.tx.to.to().copied(),
-        value: prepared.tx.value,
-        data: &prepared.tx.input,
+        chain_id: prepared.tx.chain_id().unwrap_or_default(),
+        to: prepared.tx.to(),
+        value: prepared.tx.value(),
+        data: prepared.tx.input(),
     };
     if let Verdict::Deny(reason) = state.policy.evaluate(&view) {
         tracing::warn!(tx_digest = %prepared.signing_hash, %reason, "policy denied");

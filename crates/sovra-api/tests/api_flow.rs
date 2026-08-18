@@ -206,7 +206,7 @@ async fn sign_rejects_invalid_tx_invariants() {
         to: TxKind::Call(Address::from([0x11; 20])),
         ..Default::default()
     };
-    let body = serde_json::json!({ "unsigned_transaction": encode_unsigned(&tx).to_string() });
+    let body = serde_json::json!({ "unsigned_transaction": encode_unsigned(&sovra_eth::EthTx::Eip1559(tx)).to_string() });
     let (status, resp) = call(&router, post_json("/v1/sign", body)).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);

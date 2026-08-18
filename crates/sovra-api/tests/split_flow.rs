@@ -48,6 +48,7 @@ fn permissive_policy() -> sovra_policy::Policy {
         allowed_recipients: sovra_policy::Recipients::Any,
         max_value_wei: U256::MAX,
         allow_calldata: false,
+        allow_contract_creation: false,
     }
 }
 

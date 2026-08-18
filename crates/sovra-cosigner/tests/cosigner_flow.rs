@@ -54,6 +54,7 @@ fn permissive_policy() -> sovra_policy::Policy {
         allowed_recipients: sovra_policy::Recipients::Any,
         max_value_wei: U256::MAX,
         allow_calldata: false,
+        allow_contract_creation: false,
     }
 }
 
@@ -98,12 +99,15 @@ fn unsigned_tx_bytes() -> Bytes {
     let prepared = sovra_eth::prepare(sovra_eth::TxIntent {
         chain_id: 11155111,
         nonce: 0,
-        to: Address::repeat_byte(0x11),
+        kind: alloy_primitives::TxKind::Call(Address::repeat_byte(0x11)),
         value: U256::from(1u64),
         gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
         data: Bytes::new(),
+        params: sovra_eth::TxParams::Eip1559 {
+            max_fee_per_gas: 3,
+            max_priority_fee_per_gas: 2,
+            access_list: Default::default(),
+        },
     })
     .unwrap();
     sovra_eth::encode_unsigned(&prepared.tx)

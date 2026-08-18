@@ -1,4 +1,5 @@
-//! Ethereum EIP-1559 transaction lifecycle: prepare (enrich from RPC, build,
+//! Ethereum transaction lifecycle for the supported tx types (legacy,
+//! EIP-2930, EIP-1559 — see [`EthTx`]): prepare (enrich from RPC, build,
 //! validate), encode/decode the unsigned form, and finalize (attach the
 //! signature, verify the recovered signer, emit broadcast-ready raw bytes).
 //!
@@ -31,6 +32,8 @@ mod tests;
 #[cfg(feature = "rpc")]
 use std::time::Duration;
 
+/// Re-exported so API-layer DTOs don't need their own alloy-eips dependency.
+pub use alloy_eips::eip2930::AccessList;
 #[cfg(feature = "rpc")]
 use alloy_primitives::B256;
 use alloy_primitives::{Address, U256};

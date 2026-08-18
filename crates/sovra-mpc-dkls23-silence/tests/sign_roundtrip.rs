@@ -1,4 +1,5 @@
-use sovra_eth::{TxIntent, encode_unsigned, finalize, prepare};
+use alloy_primitives::TxKind;
+use sovra_eth::{TxIntent, TxParams, encode_unsigned, finalize, prepare};
 use sovra_mpc::MpcBackend;
 use sovra_mpc_dkls23_silence::InProcessBackend;
 use sovra_state::SignerStore;
@@ -7,12 +8,15 @@ fn base_intent() -> TxIntent {
     TxIntent {
         chain_id: 11155111,
         nonce: 0,
-        to: Default::default(),
+        kind: TxKind::Call(Default::default()),
         value: Default::default(),
         gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
         data: Default::default(),
+        params: TxParams::Eip1559 {
+            max_fee_per_gas: 3,
+            max_priority_fee_per_gas: 2,
+            access_list: Default::default(),
+        },
     }
 }
 

@@ -79,12 +79,15 @@ pub fn unsigned_tx(value: u64) -> (Bytes, B256) {
     let prepared = prepare(TxIntent {
         chain_id: 11155111,
         nonce: 0,
-        to: Address::from([0x11; 20]),
+        kind: alloy_primitives::TxKind::Call(Address::from([0x11; 20])),
         value: U256::from(value),
         gas_limit: 21_000,
-        max_fee_per_gas: 3,
-        max_priority_fee_per_gas: 2,
         data: Default::default(),
+        params: sovra_eth::TxParams::Eip1559 {
+            max_fee_per_gas: 3,
+            max_priority_fee_per_gas: 2,
+            access_list: Default::default(),
+        },
     })
     .unwrap();
     (encode_unsigned(&prepared.tx), prepared.signing_hash)

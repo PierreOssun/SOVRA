@@ -26,6 +26,7 @@ alloy-transport = { workspace = true, optional = true }
 alloy-rpc-types-eth = { workspace = true, optional = true }
 thiserror = { workspace = true }
 alloy-rlp = { workspace = true }
+serde = { workspace = true }
 url = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
 tracing = { workspace = true }

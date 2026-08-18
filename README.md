@@ -1,10 +1,11 @@
-# 2-of-3 MPC Signer – DKLs23
+# Self Hosted - MPC Signer for ECDSA
 
-This repo showcases a t-of-n MPC signer, deployed as 2-of-3: two active
-cosigners plus a cold recovery shard (cloud-hosted in production, online only
-for DKG and recovery).
+Sovra is a t-of-n MPC signer, deployed as 2-of-3: two active
+cosigners plus a cold recovery shard.
 
-Prepares, signs, and broadcasts Ethereum transactions using threshold signatures (MPC).
+Every component is self-hostable. No Saas or Vendor lock-in.
+
+It offers the best security (MPC TSS) and recovery for self-hosting on Ethereum.
 
 ## 1. Architecture
 

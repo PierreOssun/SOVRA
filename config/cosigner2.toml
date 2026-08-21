@@ -4,7 +4,7 @@
 party_id = 2
 bind_addr = "127.0.0.1:4102"
 data_dir = "data/cosigner2"
-relay_url = "wss://127.0.0.1:3100/ws"
+relay_url = "wss://127.0.0.1:3100/env"
 policy_path = "config/policy2.toml"
 # mTLS material (seeded by `cargo xtask certs`); missing files abort startup
 tls_ca_path = "certs/ca.cert.pem"

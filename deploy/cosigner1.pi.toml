@@ -6,7 +6,7 @@
 party_id = 1
 bind_addr = "0.0.0.0:4101"
 data_dir = "data/cosigner1"
-relay_url = "wss://<MAC_TS_IP>:3100/ws"
+relay_url = "wss://<MAC_TS_IP>:3100/env"
 policy_path = "config/policy1.toml"
 # mTLS material (issued on the Mac by `cargo xtask certs --san ...`, then
 # shipped over — ca.key.pem never leaves the Mac); missing files abort startup

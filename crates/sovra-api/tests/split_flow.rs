@@ -1,4 +1,4 @@
-//! RemoteBackend → HTTP → cosigner routers → WsRelay → hub, plus remote
+//! RemoteBackend → HTTP → cosigner routers → WsEnvelopeRelay → hub, plus remote
 //! startup recovery and the cosigner-down 502 path. The M9 gate
 //! (`split_flow_2of3`) adds subset signing: failover to the cold party,
 //! veto-is-never-failover, and cold-party-down restart recovery.
@@ -20,7 +20,6 @@ use sovra_api::{
 };
 use sovra_cosigner::{run::build_router as cosigner_router, state::CosignerState};
 use sovra_ipc::{
-    hub::{RelayHub, ws_router},
     remote::RemoteBackend,
     tls::{TlsMaterials, serve_mtls},
 };
@@ -46,11 +45,10 @@ async fn start_hub(tls: Arc<TlsMaterials>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        serve_mtls(listener, ws_router(RelayHub::default()), &tls)
-            .await
-            .unwrap()
+        let router = sovra_ipc::hub::env_router(sovra_ipc::hub::EnvelopeHub::default());
+        serve_mtls(listener, router, &tls).await.unwrap()
     });
-    format!("wss://{addr}/ws")
+    format!("wss://{addr}/env")
 }
 
 /// Wide-open policy for the pre-M7 scenarios; deny cases build their own.
@@ -440,14 +438,17 @@ async fn split_flow_2of3() {
 /// One narrative flow: dkg-3 (cosigner2's store is XChaCha-sealed) → sign →
 /// party 1's host is destroyed → rebuilt with a NEW identity → rosters
 /// updated everywhere (config + restart, played by respawning) → startup
-/// recovery tolerates the empty rebuilt store → POST /v1/recover rebuilds
-/// the shard at the SAME address → the new generation signs.
+/// The recovery model end-to-end: 2 active shards + 1 sleeping. Proactive
+/// refresh (POST /v1/recover) rotates every shard under the SAME address; a
+/// LOST shard is not healed — signing falls back to the surviving subset
+/// (selection skips dead/unprovisioned parties), refresh refuses, and
+/// migration is a store wipe + fresh DKG at a NEW address.
 #[tokio::test(flavor = "multi_thread")]
 async fn recover_flow_2of3() {
     let dir = tempfile::tempdir().unwrap();
     let tls = test_tls(3);
     let relay_url = start_hub(tls.orchestrator.clone()).await;
-    let (mut sks, mut roster) = keys(3);
+    let (sks, roster) = keys(3);
     let seal_key = [9u8; 32];
 
     // cosigner2 = the cloud party: same state shape, sealed store.
@@ -512,19 +513,70 @@ async fn recover_flow_2of3() {
         "cloud shard must be sealed at rest"
     );
 
-    // 2. Disaster: party 1's host is gone — process dead, disk wiped.
+    // 2. Proactive refresh: same address comes back, the refreshed
+    //    generation signs, and the sealed cloud shard actually rotated
+    //    (still sealed, different ciphertext).
+    let (status, body) = call(&router, post_json("/v1/recover", serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
+        address
+    );
+    let resealed = std::fs::read(dir.path().join("party2").join("default/shard.bin")).unwrap();
+    assert!(resealed.starts_with(b"SVR1"));
+    assert_ne!(resealed, sealed_shard, "cloud shard must have been rotated");
+    let (raw2, _) = unsigned_tx(2_000_000_000);
+    let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
+    let (status, body) = call(&router, post_json("/v1/sign", req2)).await;
+    assert_eq!(status, StatusCode::OK);
+    let signed = Bytes::from_str(json(&body)["signed_transaction"].as_str().unwrap()).unwrap();
+    let envelope = TxEnvelope::decode_2718(&mut signed.as_ref()).unwrap();
+    assert_eq!(envelope.recover_signer().unwrap(), address);
+
+    // 3. Disaster: party 1's host is gone — process dead, disk wiped. It is
+    //    NOT healed: the surviving pair carries the wallet.
     h1.abort();
     let _ = h1.await;
     std::fs::remove_dir_all(dir.path().join("party1")).unwrap();
 
-    // 3. Rebuild: fresh identity key; every party's pinned roster is updated
-    //    (config + restart in production — played here by respawning all
-    //    three over their surviving stores).
-    sks[1] = SigningKey::generate(&mut rand::rngs::OsRng);
-    roster[1] = sks[1].verifying_key();
+    // 4. Orchestrator restart mid-incident: startup succeeds on the
+    //    surviving t-quorum, and signing falls back to subset {0, 2} —
+    //    selection skips the dead party (this is the degraded mode the
+    //    2-active + 1-sleeping topology is designed around).
+    let probe = tls
+        .orchestrator
+        .http_client(Duration::from_secs(5))
+        .unwrap();
+    let active = orchestrator::recover_active(&probe, &urls, 2)
+        .await
+        .unwrap();
+    assert_eq!(active, Some(public_key));
+    let router2 = api_router(&urls, active, &tls.orchestrator);
+    let (raw3, _) = unsigned_tx(3_000_000_000);
+    let req3 = serde_json::json!({ "unsigned_transaction": raw3.to_string() });
+    let (status, body) = call(&router2, post_json("/v1/sign", req3)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let signed = Bytes::from_str(json(&body)["signed_transaction"].as_str().unwrap()).unwrap();
+    let envelope = TxEnvelope::decode_2718(&mut signed.as_ref()).unwrap();
+    assert_eq!(envelope.recover_signer().unwrap(), address);
+
+    // 5. Refresh refuses in degraded mode: it needs all n parties online
+    //    with shards — a lost shard is a migration, not a refresh.
+    let (status, _) = call(&router2, post_json("/v1/recover", serde_json::json!({}))).await;
+    assert!(
+        !status.is_success(),
+        "refresh must refuse while a party is lost"
+    );
+
+    // 6. Migration: wipe every store, respawn the fleet (same identities and
+    //    roster — only the shards are gone), fresh DKG → a NEW address.
+    //    In production this is where funds move from the old address.
     for h in [h0, h2] {
         h.abort();
         let _ = h.await;
+    }
+    for party_dir in ["party0", "party1", "party2"] {
+        let _ = std::fs::remove_dir_all(dir.path().join(party_dir));
     }
     let (url0b, _h0b) = spawn_cosigner(
         cosigner_state(
@@ -554,45 +606,12 @@ async fn recover_flow_2of3() {
         spawn_cosigner(sealed_state(&sks[2], &roster), tls.cosigners[2].clone()).await;
     let urls_b = vec![(0u8, url0b), (1u8, url1b), (2u8, url2b)];
 
-    // 4. Orchestrator restart mid-incident: the empty rebuilt store is
-    //    "awaiting recovery", not a torn DKG — startup must succeed on the
-    //    surviving t-quorum.
-    let probe = tls
-        .orchestrator
-        .http_client(Duration::from_secs(5))
-        .unwrap();
-    let active = orchestrator::recover_active(&probe, &urls_b, 2)
-        .await
-        .unwrap();
-    assert_eq!(active, Some(public_key));
-
-    // 5. The ceremony: same address comes back, and the recovered generation
-    //    signs through the full stack.
-    let router2 = api_router(&urls_b, active, &tls.orchestrator);
-    let (status, body) = call(
-        &router2,
-        post_json("/v1/recover", serde_json::json!({ "lost_party": 1 })),
-    )
-    .await;
+    let router3 = api_router(&urls_b, None, &tls.orchestrator);
+    let (status, body) = call(&router3, post_json("/v1/dkg", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert_eq!(
-        Address::from_str(json(&body)["addresses"]["ethereum"].as_str().unwrap()).unwrap(),
-        address
-    );
-
-    let (raw2, _) = unsigned_tx(2_000_000_000);
-    let req2 = serde_json::json!({ "unsigned_transaction": raw2.to_string() });
-    let (status, body) = call(&router2, post_json("/v1/sign", req2)).await;
-    assert_eq!(status, StatusCode::OK);
-    let signed = Bytes::from_str(json(&body)["signed_transaction"].as_str().unwrap()).unwrap();
-    let envelope = TxEnvelope::decode_2718(&mut signed.as_ref()).unwrap();
-    assert_eq!(envelope.recover_signer().unwrap(), address);
-
-    // 6. The refresh actually replaced the sealed cloud shard (still sealed,
-    //    different ciphertext).
-    let resealed = std::fs::read(dir.path().join("party2").join("default/shard.bin")).unwrap();
-    assert!(resealed.starts_with(b"SVR1"));
-    assert_ne!(resealed, sealed_shard, "cloud shard must have been rotated");
+    let (new_public_key, new_address) = dkg_identities(&body);
+    assert_ne!(new_public_key, public_key, "migration mints a new key");
+    assert_ne!(new_address, address);
 }
 
 /// M8 gate: a client that trusts the CA but presents **no identity** is

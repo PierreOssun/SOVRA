@@ -89,15 +89,16 @@ pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
     DkgResponse::new(public_key).map(Json)
 }
 
-/// Operator endpoint: the recovery re-share ceremony. All n cosigners
-/// (including the normally-cold recovery party) must be online; the
-/// declared-lost party rebuilds its shard from scratch, every other shard
-/// re-randomizes, and the public key must come back unchanged — a different
-/// one is a broken invariant, not a result.
-#[utoipa::path(post, path = "/v1/recover", request_body = RecoverRequest)]
+/// Operator endpoint: the all-parties proactive re-randomize. Every cosigner
+/// (including the normally-cold party) must be online AND hold a shard;
+/// every shard rotates and the public key must come back unchanged — a
+/// different one is a broken invariant, not a result. This is deliberately
+/// NOT lost-shard recovery: a lost shard means the surviving subset keeps
+/// signing (selection skips unprovisioned parties), and migration is a
+/// fresh DKG plus a funds move to the new address.
+#[utoipa::path(post, path = "/v1/recover")]
 pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
-    Json(body): Json<RecoverRequest>,
 ) -> Result<Json<DkgResponse>, ApiError> {
     let _op = state
         .signer
@@ -113,14 +114,14 @@ pub async fn recover<B: MpcBackend + Send + Sync + 'static>(
         .active
         .ok_or(ApiError::DkgNotInitialized)?;
 
-    let public_key = state.backend.refresh(body.lost_party).await?;
+    let public_key = state.backend.refresh().await?;
     if public_key != active {
         return Err(ApiError::Mpc(sovra_mpc::MpcError::PartyMismatch(format!(
             "refresh returned {public_key}, active generation is {active}"
         ))));
     }
 
-    tracing::info!(%public_key, lost_party = body.lost_party, "recovery re-share complete");
+    tracing::info!(%public_key, "proactive shard refresh complete");
     DkgResponse::new(public_key).map(Json)
 }
 
@@ -422,14 +423,6 @@ pub struct BroadcastResponse {
     pub execution_success: Option<bool>,
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct RecoverRequest {
-    /// Global id of the party whose shard is being rebuilt. Its store must
-    /// be empty (a rebuilt host), and its new identity must already be in
-    /// every party's pinned roster.
-    pub lost_party: u8,
-}
-
 #[derive(OpenApi)]
 #[openapi(
     paths(dkg_create, dkg_get, prepare, sign, broadcast, recover),
@@ -440,7 +433,6 @@ pub struct RecoverRequest {
         DkgResponse,
         PrepareRequest,
         PrepareResponse,
-        RecoverRequest,
         SignRequest,
         SignatureParts,
         SignResponse

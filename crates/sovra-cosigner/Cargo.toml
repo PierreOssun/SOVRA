@@ -13,7 +13,7 @@ sovra-network = { workspace = true }
 sovra-policy = { workspace = true }
 toml = { workspace = true }
 sovra-mpc = { workspace = true }
-sovra-mpc-dkls23-silence = { workspace = true }
+sovra-mpc-dkls23-carbon = { workspace = true }
 sovra-observability = { workspace = true }
 sovra-state = { workspace = true }
 sovra-types = { workspace = true }

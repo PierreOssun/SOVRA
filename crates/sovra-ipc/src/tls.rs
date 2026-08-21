@@ -125,7 +125,7 @@ impl TlsMaterials {
             .with_single_cert(self.cert_chain.clone(), self.key.clone_key())?)
     }
 
-    /// Client config for the relay plane (`WsRelay::connect`): trusts only the
+    /// Client config for the relay plane (`WsEnvelopeRelay::connect`): trusts only the
     /// project CA and presents our leaf.
     pub fn ws_client_config(&self) -> Result<Arc<ClientConfig>, TlsError> {
         Ok(Arc::new(

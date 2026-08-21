@@ -20,7 +20,7 @@ use sovra_api::{
 };
 use sovra_eth::encode_unsigned;
 use sovra_mpc::{EcdsaParts, MpcBackend, MpcError};
-use sovra_mpc_dkls23_silence::InProcessBackend;
+use sovra_mpc_dkls23_carbon::InProcessBackend;
 use sovra_state::SignerStore;
 use sovra_types::{ACTIVE_SIGNER_ID, KeyShare, PubkeySec1, SignerId, SignerMetadata};
 use test_helpers::*;
@@ -251,29 +251,17 @@ async fn server_errors_do_not_leak_paths() {
     assert!(!error.contains(d1.path().to_str().unwrap()));
 }
 
-/// /v1/recover pins the HTTP contract of the re-share ceremony: 409 before
-/// dkg, 200 with the UNCHANGED address after, and the refreshed shards keep
-/// signing. Needs a 2-of-3 backend — recovery requires redundancy, so the
-/// usual 2-of-2 `test_router` cannot serve here.
+/// /v1/recover pins the HTTP contract of the all-parties proactive refresh:
+/// 409 before dkg, 200 with the UNCHANGED address after, and the refreshed
+/// shards keep signing. Works on the plain 2-of-2 `test_router` — with no
+/// lost-party role, a t == n scheme refreshes fine.
 #[tokio::test(flavor = "multi_thread")]
 async fn recover_requires_dkg_then_preserves_address_and_signs() {
-    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
-    let stores = dirs
-        .iter()
-        .map(|d| SignerStore::open(d.path()).unwrap())
-        .collect();
-    let provider = sovra_eth::http_provider("http://127.0.0.1:9")
-        .unwrap()
-        .erased();
-    let router = build_router(AppState::new(
-        provider,
-        InProcessBackend::new(stores, 2),
-        None,
-    ));
+    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let router = test_router(d0.path(), d1.path());
 
-    // Nothing to recover before dkg.
-    let body = serde_json::json!({ "lost_party": 1 });
-    let (status, _) = call(&router, post_json("/v1/recover", body.clone())).await;
+    // Nothing to refresh before dkg.
+    let (status, _) = call(&router, post_json("/v1/recover", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     let (status, resp) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
@@ -283,7 +271,7 @@ async fn recover_requires_dkg_then_preserves_address_and_signs() {
         .unwrap()
         .to_string();
 
-    let (status, resp) = call(&router, post_json("/v1/recover", body)).await;
+    let (status, resp) = call(&router, post_json("/v1/recover", serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         json(&resp)["addresses"]["ethereum"].as_str().unwrap(),
@@ -296,27 +284,6 @@ async fn recover_requires_dkg_then_preserves_address_and_signs() {
     let (status, resp) = call(&router, post_json("/v1/sign", req)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json(&resp)["signer_address"].as_str().unwrap(), address);
-}
-
-/// A t == n scheme has no redundancy: /v1/recover over the standard 2-of-2
-/// test backend must fail with the named error, not stall or corrupt.
-#[tokio::test(flavor = "multi_thread")]
-async fn recover_refuses_schemes_without_redundancy() {
-    let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let router = test_router(d0.path(), d1.path());
-
-    let (status, _) = call(&router, post_json("/v1/dkg", serde_json::json!({}))).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let body = serde_json::json!({ "lost_party": 1 });
-    let (status, _) = call(&router, post_json("/v1/recover", body)).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY); // MpcError::Dkg("no redundancy…")
-
-    // And the generation is untouched: signing still works.
-    let (raw, _) = unsigned_tx(1_000_000_000u64);
-    let req = serde_json::json!({ "unsigned_transaction": raw.to_string() });
-    let (status, _) = call(&router, post_json("/v1/sign", req)).await;
-    assert_eq!(status, StatusCode::OK);
 }
 
 // Delegation, not fakery: the winner gets a real signature back, so it passes
@@ -335,8 +302,8 @@ impl MpcBackend for SlowBackend {
         tokio::time::sleep(Duration::from_millis(300)).await; // widen the race window
         self.0.sign(network, unsigned_tx).await
     }
-    async fn refresh(&self, lost_party: u8) -> Result<PubkeySec1, MpcError> {
-        self.0.refresh(lost_party).await
+    async fn refresh(&self) -> Result<PubkeySec1, MpcError> {
+        self.0.refresh().await
     }
 }
 

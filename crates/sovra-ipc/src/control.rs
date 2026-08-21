@@ -40,17 +40,16 @@ pub struct StartSignRequest {
     pub participants: Vec<u8>,
 }
 
-/// `POST /refresh` body — one party's view of the recovery re-share
-/// ceremony. Like DKG, `n_parties`/`threshold` are assertions against local
-/// config. `public_key` is the ceremony's anchor: survivors verify it
-/// against their own shard, the lost party adopts it as the expected
-/// reconstruction target — a wrong value fails the ceremony.
+/// `POST /refresh` body — one party's view of the all-parties proactive
+/// re-randomize (every party brings a shard; there is no lost-party role).
+/// Like DKG, `n_parties`/`threshold` are assertions against local config.
+/// `public_key` is the ceremony's anchor: every party verifies it against
+/// its own shard — a wrong value fails the ceremony.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StartRefreshRequest {
     pub instance: B256,
     pub n_parties: u8,
     pub threshold: u8,
-    pub lost_party: u8,
     pub public_key: PubkeySec1,
 }
 

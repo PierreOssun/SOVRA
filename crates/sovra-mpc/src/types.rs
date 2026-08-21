@@ -32,11 +32,13 @@ pub trait MpcBackend {
         unsigned_tx: &[u8],
     ) -> impl Future<Output = Result<Vec<EcdsaParts>, MpcError>> + Send;
 
-    /// Recovery re-share ceremony: all n parties rebuild their shards around
-    /// the unchanged public key, with `lost_party`'s shard reconstructed
-    /// from scratch and every old shard rendered useless. Returns the
-    /// (unchanged) public key — callers verify it against the active one.
-    fn refresh(&self, lost_party: u8) -> impl Future<Output = Result<PubkeySec1, MpcError>> + Send;
+    /// All-parties proactive re-randomize: every party brings its shard,
+    /// every shard is replaced, and every old shard is rendered useless; the
+    /// public key is unchanged. Returns that key — callers verify it against
+    /// the active one. Lost-shard recovery is deliberately NOT a protocol
+    /// operation: lose a shard → sign with the surviving subset, run a fresh
+    /// DKG, migrate funds to the new address.
+    fn refresh(&self) -> impl Future<Output = Result<PubkeySec1, MpcError>> + Send;
 }
 
 /// The ceremony instance for digest `digest_index` of a multi-digest sign:
@@ -74,6 +76,8 @@ pub enum MpcError {
     Transport(String),
     #[error("cosigners disagreed: {0}")]
     PartyMismatch(String),
+    #[error("envelope authentication failed: {0}")]
+    EnvelopeAuth(String),
     #[error("rejected by cosigner policy: {}", .vetoes.iter().map(|v| format!("party {}: {}", v.party, v.reason)).collect::<Vec<_>>().join("; "))]
     Rejected { vetoes: Vec<Veto> },
 }

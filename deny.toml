@@ -9,6 +9,10 @@ version = 2
 ignore = [
   "RUSTSEC-2024-0436", # paste - no longer maintained
   "RUSTSEC-2026-0173", # proc-macro-error2 - unmaintained
+  # bincode 1.x - unmaintained (team ceased development), not a vulnerability.
+  # Forced by dkls23-core's serde feature (its message codec); our shard codec
+  # reuses it rather than adding a second format. Revisit if dkls23 migrates.
+  "RUSTSEC-2025-0141",
 ]
 
 [licenses]
@@ -27,33 +31,12 @@ allow = [
   "MPL-2.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",            # webpki-root-certs, transitive via reqwest -> alloy-provider
-  # Silence Laboratories DKLs23 crates (sl-dkls23 chain) publish no license
-  # metadata on crates.io; they are used under Silence's separate non-commercial
-  # license — the reason every sovra-* crate is publish = false. Clarified below.
-  "LicenseRef-SilenceLaboratories-NonCommercial",
 ]
 confidence-threshold = 0.8
-# Our own sovra-* crates are unpublished (publish = false) and intentionally carry
-# no license field (the project links a non-commercial dependency); skip them.
+# Our own sovra-* crates are unpublished (publish = false) and carry no license
+# field yet; skip them. (Since the 0xCarbon migration the dependency tree is
+# fully permissive — Apache-2.0/MIT — so this is bookkeeping, not a constraint.)
 private = { ignore = true }
-
-# The sl-* crates carry neither a `license` field nor a LICENSE file, so
-# cargo-deny reports them as `unlicensed`. Clarify them explicitly as Silence's
-# non-commercial license rather than mislabel them as a permissive OSS license.
-[[licenses.clarify]]
-crate = "sl-dkls23"
-expression = "LicenseRef-SilenceLaboratories-NonCommercial"
-license-files = []
-
-[[licenses.clarify]]
-crate = "sl-mpc-mate"
-expression = "LicenseRef-SilenceLaboratories-NonCommercial"
-license-files = []
-
-[[licenses.clarify]]
-crate = "sl-oblivious"
-expression = "LicenseRef-SilenceLaboratories-NonCommercial"
-license-files = []
 
 [bans]
 # Surface duplicate versions of the same crate without failing the build.

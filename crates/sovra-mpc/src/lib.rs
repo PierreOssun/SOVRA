@@ -1,13 +1,25 @@
 //! Backend-agnostic MPC seam for the `sign` path.
 //!
-//! Defines the [`MpcBackend`] trait, the shared result/error types, and the
-//! pure conversion from a k256 ECDSA signature to the `(r, s, y_parity)` triple
-//! that `sovra_eth::finalize` consumes. This crate knows nothing about any
-//! concrete MPC library.
+//! Two ports and the plumbing between them. [`MpcBackend`] is the
+//! orchestrator's port (dkg/sign/refresh over the whole scheme);
+//! [`PartyRunner`] is the cosigner's port (one party's share of a ceremony).
+//! Between them sits the sovra-owned relay plane — [`Envelope`] /
+//! [`SignedEnvelope`] (signed, p2p-sealed frames), [`EnvelopeRelay`] (the
+//! transport a runner is driven over), [`Exchange`] (the round-driver), and
+//! [`MemoryHub`] (the in-process relay for tests). This crate knows nothing
+//! about any concrete MPC library.
 //!
+mod envelope;
+mod exchange;
+mod memhub;
+mod runner;
 mod types;
 
 use alloy_primitives::U256;
+pub use envelope::{Envelope, SignedEnvelope, op};
+pub use exchange::{Exchange, Expect, RoundInbox, RoundOutbox};
+pub use memhub::{MemoryHub, MemoryRelay};
+pub use runner::{EnvelopeRelay, PartyContext, PartyRunner};
 pub use types::*;
 
 /// Convert a k256 ECDSA signature and recovery id into `finalize`'s inputs.

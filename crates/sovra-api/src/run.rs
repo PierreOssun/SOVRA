@@ -16,7 +16,7 @@ use std::time::Duration;
 use alloy_provider::Provider;
 use axum::{Router, response::Response, routing::post};
 use sovra_eth::http_provider;
-use sovra_ipc::{hub::RelayHub, remote::RemoteBackend};
+use sovra_ipc::remote::RemoteBackend;
 use sovra_mpc::MpcBackend;
 use url::Url;
 use utoipa::OpenApi;
@@ -40,7 +40,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Hub up FIRST — cosigners dial it mid-run; it must exist before any dkg/sign.
     let relay_listener = std::net::TcpListener::bind(&config.relay_bind)?;
-    let hub = sovra_ipc::hub::ws_router(RelayHub::default());
+    let hub = sovra_ipc::hub::env_router(sovra_ipc::hub::EnvelopeHub::default());
     tracing::info!("relay hub on {} (mTLS)", config.relay_bind);
 
     // Fail-closed: no TLS material, no process (same rule as the cosigners).

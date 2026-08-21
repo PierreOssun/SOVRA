@@ -1,7 +1,11 @@
+//! The migration's acceptance test: byte-for-byte the silence crate's
+//! roundtrip, written purely against `MpcBackend` — only the backend import
+//! differs. dkg → prepare → sign → finalize must recover to the dkg address.
+
 use alloy_primitives::TxKind;
 use sovra_eth::{TxIntent, TxParams, encode_unsigned, finalize, prepare};
 use sovra_mpc::MpcBackend;
-use sovra_mpc_dkls23_silence::InProcessBackend;
+use sovra_mpc_dkls23_carbon::InProcessBackend;
 use sovra_state::SignerStore;
 
 fn base_intent() -> TxIntent {

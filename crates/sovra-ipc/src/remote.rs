@@ -19,8 +19,8 @@
 //! backend's because recovery wants its own short probe timeout, not the
 //! 90s operation timeout below.
 //! Pattern: hexagonal port/adapter — the remote implementation of the
-//! `MpcBackend` port (the test-only in-process one lives in
-//! `sovra-mpc-dkls23-silence`).
+//! `MpcBackend` port (the test-only in-process one lives in the MPC
+//! backend crate).
 
 use std::time::Duration;
 
@@ -95,29 +95,22 @@ impl MpcBackend for RemoteBackend {
             .map(|i| i.signatures.into_iter().map(Into::into).collect())
     }
 
-    async fn refresh(&self, lost_party: u8) -> Result<PubkeySec1, MpcError> {
-        if !self.cosigners.iter().any(|(party, _)| *party == lost_party) {
-            return Err(MpcError::Dkg(format!(
-                "lost party {lost_party} is not in the cosigner set"
-            )));
-        }
-        // Same pre-flight as DKG — here it additionally catches rosters not
-        // yet updated with the replacement party's new identity.
+    async fn refresh(&self) -> Result<PubkeySec1, MpcError> {
+        // Same pre-flight as DKG: a mismatched roster fails as config, not
+        // as an opaque ceremony error.
         self.preflight_roster().await?;
 
-        // The ceremony's anchor: every survivor must report the same wallet
-        // public key, which the lost party will adopt as its reconstruction
-        // target. Disagreement here means shard stores have diverged.
-        let fetches = self
-            .cosigners
-            .iter()
-            .filter(|(party, _)| *party != lost_party)
-            .map(|(party, url)| async move {
-                (
-                    *party,
-                    self.get_json::<PublicKeyInfo>(*party, url, "pubkey").await,
-                )
-            });
+        // The ceremony's anchor: every party must hold a shard and report
+        // the same wallet public key. A party without a shard fails here —
+        // lost-shard recovery is not a refresh (sign with the surviving
+        // subset, fresh DKG, migrate funds instead). Disagreement means
+        // shard stores have diverged.
+        let fetches = self.cosigners.iter().map(|(party, url)| async move {
+            (
+                *party,
+                self.get_json::<PublicKeyInfo>(*party, url, "pubkey").await,
+            )
+        });
         let results = futures_util::future::join_all(fetches).await;
         let mut infos = Vec::with_capacity(results.len());
         for (party, result) in results {
@@ -127,7 +120,7 @@ impl MpcBackend for RemoteBackend {
         for (party, info) in &infos[1..] {
             if info != first {
                 return Err(MpcError::PartyMismatch(format!(
-                    "survivors disagree on the wallet public key: \
+                    "cosigners disagree on the wallet public key: \
                      cosigner{first_party} vs cosigner{party}"
                 )));
             }
@@ -137,7 +130,6 @@ impl MpcBackend for RemoteBackend {
             instance: B256::from(rand::random::<[u8; 32]>()),
             n_parties: self.cosigners.len() as u8,
             threshold: self.threshold as u8,
-            lost_party,
             public_key: first.public_key,
         };
         self.broadcast::<_, PublicKeyInfo>(&self.cosigners, "refresh", &req)

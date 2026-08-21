@@ -1,5 +1,10 @@
 # Deploy runbook — one shard on the Raspberry Pi, demo over the internet
 
+> **Backend migration note (2026-08):** the MPC backend moved from sl-dkls23
+> to 0xCarbon DKLs23. Any host deployed before that must wipe its shard store
+> and take part in a fresh DKG (identity.key, roster, certs and config carry
+> over; set `relay_url` to end in `/env`). Funds move to the new address.
+
 Step-by-step procedure to move cosigner 1 onto a Raspberry Pi, run the first
 2-of-3 DKG with the Pi as a live party, and demo prepare → sign → broadcast on
 Sepolia with the MPC rounds crossing the internet. Companion to `RUN.md`

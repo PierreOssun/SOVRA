@@ -4,7 +4,7 @@
 //!
 //! The shape both MPC handlers share is deliberate: `try_lock` the op mutex
 //! (busy = 409, never queue) → check shard preconditions → build the
-//! `PartyContext` → dial the hub fresh (`WsRelay::connect`, one connection per
+//! `PartyContext` → dial the hub fresh (`WsEnvelopeRelay::connect`, one connection per
 //! run, dropped at the end — no reconnect state to manage) → drive the party
 //! runner under `tokio::time::timeout(ttl)`. The timeout is what frees the op
 //! lock when the peer never joins; without it one dead peer would wedge this
@@ -13,29 +13,26 @@
 //! and validates the bytes and derives the signing hash itself, so this
 //! party can only ever sign well-formed transactions of a supported type
 //! (legacy/EIP-2930/EIP-1559) it inspected.
-//! Pattern: thin controllers delegating to `sovra-mpc-dkls23-silence`
-//! runners; wire types come from `sovra_ipc::control`.
+//! Pattern: thin controllers delegating to the active `PartyRunner`
+//! backend (the [`crate::backend`] alias — the whole backend swap is that
+//! one line); wire types come from `sovra_ipc::control`.
 
 use std::sync::Arc;
 
 use alloy_primitives::B256;
 use axum::{Json, extract::State};
 use sovra_eth::Ethereum;
-use sovra_ipc::{
-    client::WsRelay,
-    control::{
-        Identity, PublicKeyInfo, RosterInfo, SignaturesInfo, StartDkgRequest, StartRefreshRequest,
-        StartSignRequest,
-    },
+use sovra_ipc::control::{
+    Identity, PublicKeyInfo, RosterInfo, SignaturesInfo, StartDkgRequest, StartRefreshRequest,
+    StartSignRequest,
 };
-use sovra_mpc::sub_instance;
-use sovra_mpc_dkls23_silence::{compressed_public_key, keygen_party, refresh_party, sign_party};
+use sovra_mpc::{PartyRunner, sub_instance};
 use sovra_network::Network;
 use sovra_policy::{Policy, Verdict};
 use sovra_state::StateError;
 use sovra_types::{ACTIVE_SIGNER_ID, NetworkId, SignerId, SignerMetadata};
 
-use crate::{errors::CosignerError, state::CosignerState};
+use crate::{backend::ActiveRunner, errors::CosignerError, state::CosignerState};
 
 pub async fn dkg(
     State(state): State<Arc<CosignerState>>,
@@ -51,10 +48,11 @@ pub async fn dkg(
     let ctx = state.ctx(req.instance)?;
     assert_scheme(&state, ctx.party_vks.len(), req.n_parties, req.threshold)?;
     // dial per run, 502 on refusal
-    let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
-    let (share, public_key) = tokio::time::timeout(state.ttl, keygen_party(&ctx, relay))
-        .await
-        .map_err(|_| CosignerError::RunTimeout)??;
+    let mut relay = state.dial(req.instance).await?;
+    let (share, public_key) =
+        tokio::time::timeout(state.ttl, ActiveRunner::default().keygen(&ctx, &mut relay))
+            .await
+            .map_err(|_| CosignerError::RunTimeout)??;
     state.store.save_shard(
         &SignerMetadata {
             signer_id: id,
@@ -110,11 +108,12 @@ pub async fn sign(
     // own ttl — one stalled run must not eat the whole batch's budget.
     let mut signatures = Vec::with_capacity(digests.len());
     for (index, digest) in digests.iter().enumerate() {
-        let ctx = state.ctx(sub_instance(req.instance, index as u32))?;
-        let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
+        let run_instance = sub_instance(req.instance, index as u32);
+        let ctx = state.ctx(run_instance)?;
+        let mut relay = state.dial(run_instance).await?;
         let parts = tokio::time::timeout(
             state.ttl,
-            sign_party(&ctx, &share, (*digest).into(), subset, relay),
+            ActiveRunner::default().sign(&ctx, &share, (*digest).into(), subset, &mut relay),
         )
         .await
         .map_err(|_| CosignerError::RunTimeout)??;
@@ -160,9 +159,8 @@ pub async fn pubkey(
         Err(StateError::NotFound(_)) => return Err(CosignerError::NoSigner),
         Err(e) => return Err(e.into()),
     };
-    let keyshare = sl_keyshare(&share)?;
     Ok(Json(PublicKeyInfo {
-        public_key: compressed_public_key(&keyshare),
+        public_key: ActiveRunner::default().public_key_of(&share)?,
     }))
 }
 
@@ -185,19 +183,12 @@ fn assert_scheme(
     Ok(())
 }
 
-fn sl_keyshare(
-    share: &sovra_types::KeyShare,
-) -> Result<sovra_mpc_dkls23_silence::Keyshare, CosignerError> {
-    sovra_mpc_dkls23_silence::Keyshare::from_bytes(share.as_bytes())
-        .ok_or(CosignerError::Mpc(sovra_mpc::MpcError::Deserialize))
-}
-
-/// Recovery re-share: same shape as `dkg` (op lock → scheme assertions →
-/// dial → run under the ttl), but the shard precondition depends on the
-/// role: the declared-lost party must have NO shard (a present one means
-/// the operator declared the wrong party — 409, delete the store first),
-/// every survivor must have one. `save_shard` overwrites atomically: the
-/// old generation is dead the moment the ceremony completes.
+/// All-parties proactive re-randomize: same shape as `dkg` (op lock →
+/// scheme assertions → dial → run under the ttl), and every party must hold
+/// a shard — a missing one is the operator's cue that this host needs the
+/// recovery flow (degraded signing + fresh DKG), not a refresh. `save_shard`
+/// overwrites atomically: the old generation is dead the moment the
+/// ceremony completes.
 pub async fn refresh(
     State(state): State<Arc<CosignerState>>,
     Json(req): Json<StartRefreshRequest>,
@@ -206,34 +197,17 @@ pub async fn refresh(
     let ctx = state.ctx(req.instance)?;
     let n = ctx.party_vks.len();
     assert_scheme(&state, n, req.n_parties, req.threshold)?;
-    if req.lost_party as usize >= n {
-        return Err(CosignerError::RosterMismatch(format!(
-            "lost party {} out of range for n={n}",
-            req.lost_party
-        )));
-    }
     let id = SignerId::new(ACTIVE_SIGNER_ID);
     let old_share = match state.store.load_shard(&id) {
-        Ok(s) => Some(s),
-        Err(StateError::NotFound(_)) => None,
+        Ok(s) => s,
+        Err(StateError::NotFound(_)) => return Err(CosignerError::NoShard),
         Err(e) => return Err(e.into()),
     };
-    match (state.party_id == req.lost_party, &old_share) {
-        (true, Some(_)) => return Err(CosignerError::ShardExists),
-        (false, None) => return Err(CosignerError::NoShard),
-        _ => {}
-    }
 
-    let relay = WsRelay::connect(&state.relay_url, state.relay_tls.clone()).await?;
+    let mut relay = state.dial(req.instance).await?;
     let (share, public_key) = tokio::time::timeout(
         state.ttl,
-        refresh_party(
-            &ctx,
-            old_share.as_ref(),
-            req.lost_party,
-            &req.public_key,
-            relay,
-        ),
+        ActiveRunner::default().refresh(&ctx, &old_share, &req.public_key, &mut relay),
     )
     .await
     .map_err(|_| CosignerError::RunTimeout)??;

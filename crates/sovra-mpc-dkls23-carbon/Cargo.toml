@@ -1,0 +1,38 @@
+[package]
+name = "sovra-mpc-dkls23-carbon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sovra-mpc = { workspace = true }
+sovra-types = { workspace = true }
+sovra-eth = { workspace = true }
+sovra-network = { workspace = true }
+sovra-state = { workspace = true }
+alloy-primitives = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+# Pinned exact: the 0.14-rc RustCrypto generation underneath is still moving.
+dkls23-secp256k1 = "=0.5.1"
+# The 0.14-rc k256/elliptic-curve dkls23-core 0.5.1 is built against —
+# deliberately NOT the workspace k256 (0.13, pinned by alloy); the two
+# generations never share a type, everything crossing this crate's boundary
+# is SEC1/raw bytes. `=` because rc-series releases break each other: the
+# resolver otherwise walks to 0.14 finals that dkls23-core cannot compile
+# against. The remaining rc pins (rustcrypto-ff/-group, sha2 0.11, hmac,
+# ripemd, sha3) live in Cargo.lock via `cargo update --precise` — do not run
+# a bare `cargo update` on this workspace.
+k256 = "=0.14.0-rc.7"
+elliptic-curve = { version = "=0.14.0-rc.30", features = ["sec1"] }
+# Shard body and round-payload serialization (0xCarbon's structs are serde);
+# crate-local on purpose — the workspace's canonical wire format (the
+# envelope) stays hand-encoded.
+bincode = "1"
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -12,7 +12,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use sovra_cosigner::{run::build_router, state::CosignerState};
 use sovra_ipc::{
     control::*,
-    hub::{RelayHub, ws_router},
     tls::{TlsMaterials, serve_mtls},
 };
 use sovra_state::SignerStore;
@@ -39,11 +38,15 @@ async fn start_hub(tls: Arc<TlsMaterials>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        serve_mtls(listener, ws_router(RelayHub::default()), &tls)
-            .await
-            .unwrap()
+        serve_mtls(
+            listener,
+            sovra_ipc::hub::env_router(sovra_ipc::hub::EnvelopeHub::default()),
+            &tls,
+        )
+        .await
+        .unwrap()
     });
-    format!("wss://{addr}/ws")
+    format!("wss://{addr}/env")
 }
 
 /// Wide-open policy so pre-M7 scenarios keep exercising the MPC path;

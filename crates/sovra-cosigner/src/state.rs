@@ -13,8 +13,8 @@ use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::B256;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use sovra_ipc::control::RosterInfo;
-use sovra_mpc_dkls23_silence::types::PartyContext;
+use sovra_ipc::{control::RosterInfo, envelope_client::WsEnvelopeRelay};
+use sovra_mpc::PartyContext;
 use sovra_state::SignerStore;
 
 use crate::errors::CosignerError;
@@ -29,7 +29,7 @@ pub struct CosignerState {
     pub threshold: u8,
     pub store: SignerStore,
     pub relay_url: String,
-    /// Client config for dialing the hub (`WsRelay::connect`): pins the
+    /// Client config for dialing the hub (`WsEnvelopeRelay::connect`): pins the
     /// project CA, presents this party's leaf. Built once at startup from the
     /// same materials that serve the control API.
     pub relay_tls: Arc<rustls::ClientConfig>,
@@ -51,6 +51,19 @@ impl CosignerState {
             threshold: self.threshold,
             ttl: self.ttl,
         })
+    }
+
+    /// Dial the relay hub for one ceremony run: fresh connection, this
+    /// party's mailbox claimed for `instance`, dropped when the run ends —
+    /// no reconnect state to manage.
+    pub async fn dial(&self, instance: B256) -> Result<WsEnvelopeRelay, CosignerError> {
+        Ok(WsEnvelopeRelay::connect(
+            &self.relay_url,
+            self.relay_tls.clone(),
+            instance,
+            self.party_id,
+        )
+        .await?)
     }
 
     /// The `GET /roster` payload. The hash commits to (n, t, every vk in id

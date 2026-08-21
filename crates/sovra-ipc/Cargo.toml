@@ -9,14 +9,13 @@ sovra-mpc = { workspace = true }
 sovra-types = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 # rustls-tls-webpki-roots is the only public route to Connector::Rustls; the
-# webpki roots it pulls go unused — WsRelay always passes an explicit connector.
+# webpki roots it pulls go unused — WsEnvelopeRelay always passes an explicit connector.
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "net", "time"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sl-mpc-mate = { workspace = true, features = ["simple-relay"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 rand = { workspace = true }
 thiserror = { workspace = true }
@@ -33,4 +32,7 @@ blocking = ["reqwest/blocking"]
 
 [dev-dependencies]
 sovra-certs = { workspace = true }
+sovra-mpc-dkls23-carbon = { workspace = true }
 tempfile = { workspace = true }
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

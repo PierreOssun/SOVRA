@@ -51,7 +51,7 @@ fn default_bind_addr() -> String {
     "127.0.0.1:4100".into()
 }
 fn default_relay_url() -> String {
-    "wss://127.0.0.1:3100/ws".into()
+    "wss://127.0.0.1:3100/env".into()
 }
 fn default_ttl_secs() -> u64 {
     60

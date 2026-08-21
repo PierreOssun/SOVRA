@@ -1,8 +1,8 @@
 //! Shared, serializable types for the `sign` path.
 //!
 //! Deliberately MPC-backend-agnostic and chain-agnostic: the opaque
-//! [`KeyShare`] holds whatever bytes the MPC library produces (for
-//! `sl-dkls23`, `Keyshare::as_slice()`), and [`PubkeySec1`] — not a
+//! [`KeyShare`] holds whatever bytes the MPC backend's shard codec
+//! produces, and [`PubkeySec1`] — not a
 //! network's address format — is the canonical key identity, since one
 //! secp256k1 key yields a different address on every network.
 //! Round-message types are owned by the MPC library, not modeled here.
@@ -123,8 +123,8 @@ impl std::fmt::Display for SignerId {
 
 /// Opaque key-share bytes for one MPC party.
 ///
-/// For `sl-dkls23` these are `Keyshare::as_slice()` bytes, reloadable via
-/// `Keyshare::from_bytes`. Kept opaque so persistence never depends on the
+/// The active backend's shard codec defines the encoding (a versioned,
+/// magic-prefixed body). Kept opaque so persistence never depends on the
 /// MPC backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyShare(pub Vec<u8>);

@@ -68,6 +68,14 @@ pub async fn prepare<B: MpcBackend + Send + Sync + 'static>(
     }))
 }
 
+/// Liveness only (compose healthchecks, `sovra check`): 200 the moment the
+/// process serves — deliberately no dependency probing, so a down cosigner
+/// never makes THIS process restart-loop. Readiness questions go to
+/// `GET /v1/dkg` / the cosigners' own `/health`.
+pub async fn health() -> &'static str {
+    "ok"
+}
+
 #[utoipa::path(post, path = "/v1/dkg")]
 pub async fn dkg_create<B: MpcBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,

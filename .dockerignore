@@ -1,0 +1,12 @@
+# Whitelist: the build needs exactly the workspace manifests and sources.
+# Everything else — target/ (huge), certs/ and data/ (SECRETS — never in a
+# build context), .git, docs — stays out.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+# Per-crate junk that may exist inside crates/ locally:
+crates/*/target
+crates/*/Cargo.lock
+# NOT whitelisted on purpose: rust-toolchain.toml pins nightly for local dev
+# (miri); the image builds on its own pinned stable instead.

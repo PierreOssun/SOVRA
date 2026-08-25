@@ -1,0 +1,109 @@
+name: Images
+
+# Multi-arch container publish to GHCR: two NATIVE runner jobs (no
+# cross-compilation — aws-lc-sys compiles C + assembly, same reason the old
+# Build ARM Cosigner workflow used a native runner; this replaces it), then
+# one merge job stitching the per-arch images into multi-arch manifests.
+#
+# Tags per image (sovra-cosigner / sovra-api / sovra-cli):
+#   <sha>-amd64 / <sha>-arm64   from the build jobs (kept: traceability and
+#                               exact pinning in compose)
+#   sha-<short>                 merged manifest, every push
+#   latest                      merged manifest, pushes to main and tags
+#   <X.Y.Z>                     merged manifest, tags vX.Y.Z
+#
+# One-time manual step after the first publish: set the three packages to
+# PUBLIC in the GitHub UI (packages default to private; the tree is
+# Apache-2.0/MIT since the 0xCarbon migration, so public is the intent).
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+
+env:
+  BASE: ghcr.io/pierreossun/sovra
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Three targets from one Dockerfile; the builder stage is shared, so
+      # the workspace compiles once per arch and the second and third builds
+      # only assemble their runtime layers.
+      - name: Build and push cosigner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cosigner
+          tags: ${{ env.BASE }}-cosigner:${{ github.sha }}-${{ matrix.arch }}
+          push: true
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+      - name: Build and push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          tags: ${{ env.BASE }}-api:${{ github.sha }}-${{ matrix.arch }}
+          push: true
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+      - name: Build and push cli
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cli
+          tags: ${{ env.BASE }}-cli:${{ github.sha }}-${{ matrix.arch }}
+          push: true
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+  merge:
+    name: merge manifests
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch manifests
+        run: |
+          set -eu
+          short=$(echo "${{ github.sha }}" | cut -c1-12)
+          for img in cosigner api cli; do
+            src="$BASE-$img"
+            tags="-t $src:sha-$short"
+            case "${{ github.ref }}" in
+              refs/heads/main) tags="$tags -t $src:latest" ;;
+              refs/tags/v*)    tags="$tags -t $src:${GITHUB_REF_NAME#v} -t $src:latest" ;;
+            esac
+            docker buildx imagetools create $tags \
+              "$src:${{ github.sha }}-amd64" \
+              "$src:${{ github.sha }}-arm64"
+            docker buildx imagetools inspect "$src:sha-$short"
+          done

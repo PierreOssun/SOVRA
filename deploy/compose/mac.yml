@@ -1,0 +1,43 @@
+# The sleeping shard (cosigner 2). NOT `restart: unless-stopped` — this
+# party runs on demand: DKG and refresh ceremonies need it up; normal signing
+# should find it stopped (it is drawn in automatically only when an active
+# party is down). `docker compose -f mac.yml up -d` to wake, `down` to sleep.
+#
+# Its data volume is the scheme's seedphrase-equivalent: back it up offline
+# after every ceremony (shard + identity.key; keep the seal key elsewhere).
+name: sovra-mac
+
+services:
+  cosigner2:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
+    network_mode: host
+    restart: "no"
+    environment:
+      SOVRA_COSIGNER_PARTY_ID: "2"
+      SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4102
+      SOVRA_COSIGNER_DATA_DIR: /opt/sovra/data
+      SOVRA_COSIGNER_POLICY_PATH: /opt/sovra/config/policy2.toml
+      SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner2.cert.pem
+      SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner2.key.pem
+      SOVRA_COSIGNER_RELAY_URL: wss://${CLOUD_TS_IP}:3100/env
+      SOVRA_COSIGNER_PARTICIPANTS: ${SOVRA_PARTICIPANTS:-}
+      # The cold shard should be sealed at rest:
+      # SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal2.key
+    volumes:
+      - data2:/opt/sovra/data
+      - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
+      - ${SOVRA_CONFIG_DIR:-./config}:/opt/sovra/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs --cacert /opt/sovra/certs/ca.cert.pem --cert /opt/sovra/certs/cosigner2.cert.pem --key /opt/sovra/certs/cosigner2.key.pem https://127.0.0.1:4102/health",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  data2:

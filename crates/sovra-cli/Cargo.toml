@@ -1,11 +1,17 @@
 [package]
 name = "sovra-cli"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
+# Operator-side cert provisioning (`sovra-cli certs ...`) — rcgen links here
+# by design; the rule is that it never links into the SERVER binaries.
+sovra-certs = { workspace = true }
+# `identity` verb: same key type the cosigner pins.
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }

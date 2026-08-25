@@ -111,10 +111,11 @@ curl -sk https://127.0.0.1:4100/health  # TLS but no client cert → handshake r
 - **Rotation** (leaves are valid 2 years): `rm certs/<name>.*.pem && cargo xtask certs`.
   To rotate the **CA**, delete everything in `certs/` — a fresh CA over surviving
   leaves is refused (they would no longer chain).
-- **Deploying a cosigner to another host** (e.g. the Pi): delete its leaf, re-issue
-  with the host in the SANs — `cargo xtask certs --san 192.168.x.y` — then ship the
-  leaf pair plus `ca.cert.pem` **only**. `ca.key.pem` never leaves the provisioning
-  machine.
+- **Deploying a cosigner to another host** (e.g. the Pi): don't ship key
+  material — use the CSR enrollment flow (`sovra certs csr` on the host,
+  `sovra certs sign` on the CA machine; only the CSR and the certificate
+  travel, both public). See DEPLOY_RUNBOOK.md §2. `ca.key.pem` never leaves
+  the provisioning machine either way.
 
 The public :3000 stays plaintext loopback — the CLI needs no certs.
 

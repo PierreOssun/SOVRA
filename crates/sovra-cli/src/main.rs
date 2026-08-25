@@ -1,11 +1,14 @@
-//! Operator CLI mirroring the `sovra-api` orchestrator endpoints (M3).
+//! Operator CLI: the `sovra-api` orchestrator endpoints plus local
+//! provisioning.
 //!
 //! One subcommand per endpoint — `dkg`, `prepare`, `sign`, `broadcast` —
-//! each a thin HTTP call that pretty-prints the JSON response. It holds no
-//! key material and no state: all crypto and persistence happen server-side;
-//! this exists so the whole vertical slice (provision once, sign later,
-//! broadcast last) can be driven end-to-end from a shell without
-//! hand-writing curl bodies.
+//! each a thin HTTP call that pretty-prints the JSON response, so the whole
+//! vertical slice can be driven from a shell without hand-writing curl
+//! bodies. Two local verb families run with no orchestrator at all: `certs`
+//! (CA + CSR enrollment — this IS where key material is handled, on the
+//! machine it belongs to) and `identity` (a cosigner's roster key, mintable
+//! before the cosigner ever starts). Local verbs exist in this shipped
+//! binary so a deployed host never needs the Rust toolchain.
 //!
 //! Composable by design: stdout carries only the response JSON (errors go to
 //! stderr, non-2xx exits 1), so `prepare | jq -r .unsigned_transaction` feeds
@@ -13,6 +16,8 @@
 //! `broadcast --tx`. A 202 (submitted, unmined) is a success exit — pending
 //! is not a failure.
 
+mod certs;
+mod identity;
 mod types;
 
 use std::process::ExitCode;
@@ -26,6 +31,9 @@ use types::*;
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let (path, body) = match &cli.command {
+        // Local provisioning — no orchestrator involved.
+        Command::Certs(cmd) => return certs::run(cmd),
+        Command::Identity { data_dir } => return identity::run(data_dir),
         Command::Dkg => ("/v1/dkg", None),
         Command::Prepare { to, value, data } => (
             "/v1/prepare",

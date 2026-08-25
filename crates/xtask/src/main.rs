@@ -263,6 +263,7 @@ fn load_cosigner_configs(root: &Path) -> Result<Vec<CosignerConfig>, Box<dyn Err
             let path = root.join(config);
             Ok(CosignerConfig::load(
                 path.to_str().ok_or("config path is not UTF-8")?,
+                true,
             )?)
         })
         .collect()

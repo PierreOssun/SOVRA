@@ -1,0 +1,165 @@
+# The one-command first touch: a full 2-of-3 fleet + orchestrator on ONE
+# machine, ceremony included. `docker compose -f demo.yml up -d` then
+# `docker compose -f demo.yml logs dkg` for the wallet address; the API is
+# on 127.0.0.1:3000. NOT a production topology — one host holds every shard;
+# the real thing is cloud.yml + pi.yml + mac.yml on separate machines.
+#
+# Flow: init mints certs + identities + roster + policy (see demo-init.sh),
+# the cosigners start already-pinned (the entrypoint wrapper injects the
+# roster init wrote), the api waits for all three healthchecks, and the dkg
+# one-shot provisions the wallet.
+name: sovra-demo
+
+x-cosigner: &cosigner
+  image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
+  restart: unless-stopped
+  depends_on:
+    init:
+      condition: service_completed_successfully
+  # The roster is data produced by init, not a host-side .env value — the
+  # wrapper turns it into the env the cosigner expects.
+  entrypoint:
+    [
+      "sh",
+      "-c",
+      "export SOVRA_COSIGNER_PARTICIPANTS=$(cat /opt/sovra/certs/participants) && exec sovra-cosigner",
+    ]
+
+services:
+  init:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cli:${SOVRA_TAG:-latest}
+    user: "0" # volume mount points are root's; init chowns to sovra (999)
+    entrypoint: ["sh", "/demo-init.sh"]
+    volumes:
+      - ./demo-init.sh:/demo-init.sh:ro
+      - certs:/opt/sovra/certs
+      - config:/opt/sovra/config
+      - data0:/data0
+      - data1:/data1
+      - data2:/data2
+
+  cosigner0:
+    <<: *cosigner
+    environment:
+      SOVRA_COSIGNER_PARTY_ID: "0"
+      SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4100
+      SOVRA_COSIGNER_DATA_DIR: /opt/sovra/data
+      SOVRA_COSIGNER_POLICY_PATH: /opt/sovra/config/policy-demo.toml
+      SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner0.cert.pem
+      SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner0.key.pem
+      SOVRA_COSIGNER_RELAY_URL: wss://api:3100/env
+    volumes:
+      - data0:/opt/sovra/data
+      - certs:/opt/sovra/certs:ro
+      - config:/opt/sovra/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs --cacert /opt/sovra/certs/ca.cert.pem --cert /opt/sovra/certs/cosigner0.cert.pem --key /opt/sovra/certs/cosigner0.key.pem https://127.0.0.1:4100/health",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  cosigner1:
+    <<: *cosigner
+    environment:
+      SOVRA_COSIGNER_PARTY_ID: "1"
+      SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4100
+      SOVRA_COSIGNER_DATA_DIR: /opt/sovra/data
+      SOVRA_COSIGNER_POLICY_PATH: /opt/sovra/config/policy-demo.toml
+      SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner1.cert.pem
+      SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner1.key.pem
+      SOVRA_COSIGNER_RELAY_URL: wss://api:3100/env
+    volumes:
+      - data1:/opt/sovra/data
+      - certs:/opt/sovra/certs:ro
+      - config:/opt/sovra/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs --cacert /opt/sovra/certs/ca.cert.pem --cert /opt/sovra/certs/cosigner1.cert.pem --key /opt/sovra/certs/cosigner1.key.pem https://127.0.0.1:4100/health",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  cosigner2:
+    <<: *cosigner
+    environment:
+      SOVRA_COSIGNER_PARTY_ID: "2"
+      SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4100
+      SOVRA_COSIGNER_DATA_DIR: /opt/sovra/data
+      SOVRA_COSIGNER_POLICY_PATH: /opt/sovra/config/policy-demo.toml
+      SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner2.cert.pem
+      SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner2.key.pem
+      SOVRA_COSIGNER_RELAY_URL: wss://api:3100/env
+    volumes:
+      - data2:/opt/sovra/data
+      - certs:/opt/sovra/certs:ro
+      - config:/opt/sovra/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs --cacert /opt/sovra/certs/ca.cert.pem --cert /opt/sovra/certs/cosigner2.cert.pem --key /opt/sovra/certs/cosigner2.key.pem https://127.0.0.1:4100/health",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  api:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-api:${SOVRA_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      cosigner0:
+        condition: service_healthy
+      cosigner1:
+        condition: service_healthy
+      cosigner2:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      SOVRA_RPC_URL: ${SOVRA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      SOVRA_BIND_ADDR: 0.0.0.0:3000
+      SOVRA_RELAY_BIND: 0.0.0.0:3100
+      SOVRA_COSIGNER_URLS: 0=https://cosigner0:4100,1=https://cosigner1:4100,2=https://cosigner2:4100
+      SOVRA_THRESHOLD: "2"
+      SOVRA_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_TLS_CERT_PATH: /opt/sovra/certs/orchestrator.cert.pem
+      SOVRA_TLS_KEY_PATH: /opt/sovra/certs/orchestrator.key.pem
+    volumes:
+      - certs:/opt/sovra/certs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # One-shot: provisions the wallet and prints the address, then exits —
+  # `docker compose -f demo.yml logs dkg` to read it. Re-running against a
+  # provisioned fleet 409s, which is correct (no silent key rotation).
+  dkg:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cli:${SOVRA_TAG:-latest}
+    restart: "no"
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["--api-url", "http://api:3000", "dkg"]
+
+volumes:
+  certs:
+  config:
+  data0:
+  data1:
+  data2:

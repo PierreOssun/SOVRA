@@ -14,7 +14,11 @@
 use std::time::Duration;
 
 use alloy_provider::Provider;
-use axum::{Router, response::Response, routing::post};
+use axum::{
+    Router,
+    response::Response,
+    routing::{get, post},
+};
 use sovra_eth::http_provider;
 use sovra_ipc::remote::RemoteBackend;
 use sovra_mpc::MpcBackend;
@@ -82,6 +86,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn build_router<B: MpcBackend + Send + Sync + 'static>(state: AppState<B>) -> Router {
     Router::new()
+        .route("/health", get(api::health))
         .route("/v1/dkg", post(api::dkg_create).get(api::dkg_get))
         .route("/v1/recover", post(api::recover))
         .route("/v1/prepare", post(api::prepare))

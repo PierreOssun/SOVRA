@@ -3,8 +3,18 @@
 //! mTLS trusts flows from here.
 //!
 //! Why a dedicated crate instead of a module in sovra-ipc: rcgen must provably
-//! never link into the shipped binaries — xtask depends on this crate normally,
-//! the server/client crates only as a dev-dependency for their TLS tests.
+//! never link into the *server* binaries (sovra-api, sovra-cosigner) — those
+//! depend on this crate only as a dev-dependency for their TLS tests.
+//! Operator tools (xtask, sovra-cli's `certs` subcommands) link it by design:
+//! cert minting is an operator act, never a server capability.
+//!
+//! Two provisioning flows share the CA:
+//! - `ensure_leaf` — key + cert minted together on the CA machine (dev/xtask).
+//! - CSR enrollment ([`generate_csr`] on the node, [`sign_csr`] on the CA
+//!   machine) — the deployment flow: a node's private key is born where it
+//!   will live and never travels; only the CSR and the signed certificate
+//!   (both public) cross machines.
+//!
 //! Load-if-exists / generate-if-absent / refuse-to-overwrite mirrors the
 //! ed25519 identity-seeding precedent, so a re-run is always additive: adding a
 //! party or re-issuing for a new host (`--san`) never rewrites existing
@@ -15,8 +25,8 @@
 use std::path::{Path, PathBuf};
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
 };
 
 /// CA file names under the certs dir. The CA *key* never leaves the
@@ -164,6 +174,93 @@ pub fn ensure_leaf(
         cert: cert_path,
         key: key_path,
     })
+}
+
+/// Where an enrollment's material lives on the node: the private key (stays
+/// here forever) and the CSR (travels to the CA machine).
+#[derive(Debug)]
+pub struct CsrPaths {
+    pub csr: PathBuf,
+    pub key: PathBuf,
+}
+
+/// Node-side half of CSR enrollment: generate `<file_stem>.{key,csr}.pem`
+/// under `dir`. The key never leaves this machine; the CSR carries the CN
+/// and SANs for the CA operator to review. Same additive semantics as
+/// [`ensure_leaf`]: existing material wins, a half-present pair is a hard
+/// error. Usages and validity are deliberately NOT requested here — they are
+/// CA policy, stamped by [`sign_csr`].
+pub fn generate_csr(
+    dir: &Path,
+    file_stem: &str,
+    common_name: &str,
+    sans: &[String],
+) -> Result<CsrPaths, CertsError> {
+    std::fs::create_dir_all(dir).map_err(|e| CertsError::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    let csr_file = format!("{file_stem}.csr.pem");
+    let key_file = format!("{file_stem}.key.pem");
+    let csr_path = dir.join(&csr_file);
+    let key_path = dir.join(&key_file);
+
+    match (csr_path.exists(), key_path.exists()) {
+        (true, true) => {}
+        (false, false) => {
+            let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+            let mut params = CertificateParams::new(sans.to_vec())?;
+            params
+                .distinguished_name
+                .push(DnType::CommonName, common_name);
+            let csr = params.serialize_request(&key)?;
+            sovra_state::write_atomic(&key_path, key.serialize_pem().as_bytes())?;
+            sovra_state::write_atomic(&csr_path, csr.pem()?.as_bytes())?;
+        }
+        (true, false) => return Err(half_present(dir, &csr_file, &key_file)),
+        (false, true) => return Err(half_present(dir, &key_file, &csr_file)),
+    }
+    Ok(CsrPaths {
+        csr: csr_path,
+        key: key_path,
+    })
+}
+
+/// CA-side half of CSR enrollment: sign a node's CSR into a standard sovra
+/// leaf. The CSR's CN and SANs are honored (that is what the operator
+/// reviews — see [`describe_csr`]); usages, EKUs and validity are stamped
+/// from CA policy so a requester can never ask for more than a leaf.
+/// Returns the certificate PEM — public data, send it back over anything.
+pub fn sign_csr(ca: &Ca, csr_pem: &str) -> Result<String, CertsError> {
+    let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
+    csr.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    csr.params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    (csr.params.not_before, csr.params.not_after) = validity(LEAF_VALIDITY_DAYS);
+    Ok(csr.signed_by(&ca.issuer)?.pem())
+}
+
+/// What a CSR asks for, for the CA operator's eyeball check before signing.
+pub fn describe_csr(csr_pem: &str) -> Result<String, CertsError> {
+    let csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
+    let cn = match csr.params.distinguished_name.get(&DnType::CommonName) {
+        Some(rcgen::DnValue::Utf8String(s)) => s.clone(),
+        Some(other) => format!("{other:?}"),
+        None => "<none>".into(),
+    };
+    let sans: Vec<String> = csr
+        .params
+        .subject_alt_names
+        .iter()
+        .map(|san| match san {
+            rcgen::SanType::DnsName(d) => d.as_str().to_owned(),
+            rcgen::SanType::IpAddress(ip) => ip.to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    Ok(format!("CN {cn}, SANs [{}]", sans.join(", ")))
 }
 
 /// First non-CA `.pem` under `dir`, if any — only consulted before minting a
@@ -338,6 +435,80 @@ mod tests {
             names.contains(&GeneralName::IPAddress(&[192, 168, 7, 42])),
             "{names:?}"
         );
+    }
+
+    /// The deployment enrollment flow end to end: key born on the "node"
+    /// dir, only the CSR crosses to the "CA machine" dir, and the signed
+    /// cert chains to the CA with full leaf policy (both EKUs) even though
+    /// the CSR requested none — a requester cannot shape its own usages.
+    #[test]
+    fn csr_enrollment_roundtrip() {
+        let node = tempfile::tempdir().unwrap();
+        let ca_machine = tempfile::tempdir().unwrap();
+
+        let paths = generate_csr(
+            node.path(),
+            "cosigner1",
+            "sovra-cosigner-1",
+            &["100.64.0.7".into()],
+        )
+        .expect("csr");
+        let csr_pem = std::fs::read_to_string(&paths.csr).unwrap();
+        assert!(csr_pem.contains("BEGIN CERTIFICATE REQUEST"));
+
+        let ca = ensure_ca(ca_machine.path()).unwrap();
+        let summary = describe_csr(&csr_pem).expect("describable");
+        assert!(summary.contains("sovra-cosigner-1"), "{summary}");
+        let cert_pem = sign_csr(&ca, &csr_pem).expect("sign");
+
+        let der = parse_der(&cert_pem);
+        let (_, cert) = X509Certificate::from_der(&der).expect("x509");
+        let issuer_cn = cert
+            .issuer()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok());
+        assert_eq!(issuer_cn, Some("sovra-ca"));
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok());
+        assert_eq!(cn, Some("sovra-cosigner-1"));
+        let eku = cert.extended_key_usage().unwrap().expect("EKU present");
+        assert!(eku.value.server_auth && eku.value.client_auth);
+        let san = cert.subject_alternative_name().unwrap().expect("SAN");
+        assert!(
+            san.value
+                .general_names
+                .contains(&GeneralName::IPAddress(&[100, 64, 0, 7])),
+            "{:?}",
+            san.value.general_names
+        );
+
+        // The private key exists exactly once, on the node.
+        assert!(paths.key.exists());
+        assert!(!ca_machine.path().join("cosigner1.key.pem").exists());
+    }
+
+    #[test]
+    fn csr_is_additive_and_half_present_is_hard() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = generate_csr(dir.path(), "n", "sovra-n", &default_sans()).unwrap();
+        let before = std::fs::read(&paths.csr).unwrap();
+        generate_csr(dir.path(), "n", "other", &["10.0.0.9".into()]).unwrap();
+        assert_eq!(std::fs::read(&paths.csr).unwrap(), before, "existing wins");
+
+        std::fs::remove_file(&paths.key).unwrap();
+        let err = generate_csr(dir.path(), "n", "sovra-n", &default_sans()).unwrap_err();
+        assert!(matches!(err, CertsError::HalfPresent { .. }), "{err}");
+    }
+
+    #[test]
+    fn sign_csr_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = ensure_ca(dir.path()).unwrap();
+        assert!(sign_csr(&ca, "not a csr").is_err());
     }
 
     /// Watch-point: WebPkiClientVerifier demands clientAuth, server

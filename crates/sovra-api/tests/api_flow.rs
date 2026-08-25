@@ -54,6 +54,12 @@ async fn dkg_lifecycle() {
     let (d0, d1) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let router = test_router(d0.path(), d1.path());
 
+    // Liveness is up before any provisioning — compose healthchecks and
+    // `sovra check` rely on that.
+    let (status, body) = call(&router, get("/health")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"ok");
+
     // Nothing provisioned yet.
     let (status, _) = call(&router, get("/v1/dkg")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

@@ -26,10 +26,13 @@ use sovra_state::SignerStore;
 use crate::{api, config::Config, identity, state::CosignerState};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config/cosigner0".into());
-    let config = Config::load(&config_path)?;
+    // An explicitly passed file must exist; the default path is best-effort
+    // so an env-only container (`SOVRA_COSIGNER_*` alone) needs no file.
+    let (config_path, explicit) = match std::env::args().nth(1) {
+        Some(p) => (p, true),
+        None => ("config/cosigner0".to_string(), false),
+    };
+    let config = Config::load(&config_path, explicit)?;
 
     let data_dir = Path::new(&config.data_dir);
     let signing_key = identity::load_or_generate(data_dir)?;

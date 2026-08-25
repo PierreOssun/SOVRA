@@ -62,12 +62,18 @@ fn default_threshold() -> u8 {
 
 impl Config {
     /// Unlike sovra-api's fixed `config/sepolia`, the file is a parameter —
-    /// each cosigner process needs its own config.
-    pub fn load(path: &str) -> Result<Self, ConfigError> {
+    /// each cosigner process needs its own config. `required` mirrors
+    /// sovra-api's rule: an explicitly requested file must exist, the
+    /// default path is best-effort so an env-only container needs no file
+    /// (missing required keys then fail with their own named errors).
+    pub fn load(path: &str, required: bool) -> Result<Self, ConfigError> {
         let cfg: Self = RawConfig::builder()
-            .add_source(File::with_name(path).required(true))
+            .add_source(File::with_name(path).required(required))
             .add_source(
+                // ignore_empty: `SOVRA_COSIGNER_PARTICIPANTS=` (an unfilled
+                // .env line) must mean bootstrap mode, not a 1-entry roster.
                 Environment::with_prefix("SOVRA_COSIGNER")
+                    .ignore_empty(true)
                     .try_parsing(true)
                     .list_separator(",")
                     .with_list_parse_key("participants"),
@@ -124,14 +130,14 @@ mod tests {
     fn missing_tls_keys_refuse_to_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(&dir, REQUIRED_SANS_TLS);
-        assert!(super::Config::load(&path).is_err());
+        assert!(super::Config::load(&path, true).is_err());
     }
 
     #[test]
     fn full_config_loads_and_defaults_apply() {
         let dir = tempfile::tempdir().unwrap();
         let body = format!("{REQUIRED_SANS_TLS}{TLS}");
-        let cfg = super::Config::load(&write_config(&dir, &body)).unwrap();
+        let cfg = super::Config::load(&write_config(&dir, &body), true).unwrap();
         assert_eq!(cfg.bind_addr, "127.0.0.1:4100"); // serde default applied
         assert_eq!(cfg.ttl_secs, 60);
         assert_eq!(cfg.threshold, 2); // t-of-n default
@@ -146,16 +152,16 @@ mod tests {
         let roster3 = "participants = [\"aa\", \"bb\", \"cc\"]\n";
 
         let body = format!("party_id = 3\ndata_dir = \"d\"\npolicy_path = \"p\"\n{TLS}{roster3}");
-        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // id 3 of n=3
+        assert!(super::Config::load(&write_config(&dir, &body), true).is_err()); // id 3 of n=3
 
         let body = format!("{REQUIRED_SANS_TLS}{TLS}{roster3}threshold = 4\n");
-        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // t > n
+        assert!(super::Config::load(&write_config(&dir, &body), true).is_err()); // t > n
 
         let body = format!("{REQUIRED_SANS_TLS}{TLS}participants = [\"aa\"]\n");
-        assert!(super::Config::load(&write_config(&dir, &body)).is_err()); // n < 2
+        assert!(super::Config::load(&write_config(&dir, &body), true).is_err()); // n < 2
 
         let body = format!("{REQUIRED_SANS_TLS}{TLS}{roster3}");
-        let cfg = super::Config::load(&write_config(&dir, &body)).unwrap();
+        let cfg = super::Config::load(&write_config(&dir, &body), true).unwrap();
         assert_eq!(cfg.participants.unwrap().len(), 3); // 2-of-3 loads
     }
 }

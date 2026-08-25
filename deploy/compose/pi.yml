@@ -1,0 +1,39 @@
+# The Pi: cosigner 1. Fill .env (see pi.env.example), then
+# `docker compose -f pi.yml up -d`. See cloud.yml for the host-networking
+# rationale; :4101 is the only port facing the tailnet.
+name: sovra-pi
+
+services:
+  cosigner1:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      SOVRA_COSIGNER_PARTY_ID: "1"
+      SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4101
+      SOVRA_COSIGNER_DATA_DIR: /opt/sovra/data
+      SOVRA_COSIGNER_POLICY_PATH: /opt/sovra/config/policy1.toml
+      SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner1.cert.pem
+      SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner1.key.pem
+      SOVRA_COSIGNER_RELAY_URL: wss://${CLOUD_TS_IP}:3100/env
+      SOVRA_COSIGNER_PARTICIPANTS: ${SOVRA_PARTICIPANTS:-}
+      # The Pi's shard leaves your desk — sealing recommended:
+      # SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal1.key
+    volumes:
+      - data1:/opt/sovra/data
+      - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
+      - ${SOVRA_CONFIG_DIR:-./config}:/opt/sovra/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fs --cacert /opt/sovra/certs/ca.cert.pem --cert /opt/sovra/certs/cosigner1.cert.pem --key /opt/sovra/certs/cosigner1.key.pem https://127.0.0.1:4101/health",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  data1:

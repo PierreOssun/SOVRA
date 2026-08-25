@@ -14,6 +14,22 @@ MPC TSS is the industry standard for institutional key custody: the technology b
 
 Built for Ethereum (for now :) ).
 
+## Quickstart
+
+One machine, one command to a signing MPC wallet (Docker required) — a
+taste, not a custody setup, since one host holds every shard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PierreOssun/SOVRA/main/deploy/install.sh | sh
+mkdir sovra-demo && cd sovra-demo
+sovra init demo && sovra up
+# → { "addresses": { "ethereum": "0x…" } }   API on http://127.0.0.1:3000
+```
+
+The real thing — shards on separate machines you own — is the same launcher
+with three roles (`cloud`, `pi`, `mac`) and two commands per host plus one
+roster paste. Follow `DEPLOY_RUNBOOK.md`; `RUN.md` covers the local dev flow.
+
 ## 1. Architecture
 
 ### 1.1 Component scope

@@ -1,0 +1,11 @@
+# Per-party signing policy — EDIT THIS. Evaluated by this cosigner before
+# any MPC message; every key is required and the process refuses to start
+# without the file (fail-closed: no policy, no signing).
+allowed_chain_ids = [11155111] # Sepolia only
+
+# List of 0x-addresses, or the single entry "*" for any recipient.
+allowed_recipients = ["0x000000000000000000000000000000000000dead"]
+
+max_value_wei = "1000000000000000000" # 1 ETH, decimal string
+
+allow_calldata = false

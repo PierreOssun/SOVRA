@@ -1,0 +1,94 @@
+name: Release
+
+# Tag vX.Y.Z → native builds on all three deployment targets (no
+# cross-compilation: aws-lc-sys compiles C + assembly), tarballs with
+# sha256s, one GitHub Release. Linux tarballs link the runner's glibc
+# (2.39, Ubuntu 24.04+) — the Docker images are the primary Linux channel;
+# these binaries serve macOS and bare-metal-by-choice.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # The repo pins nightly for local dev (miri); releases build on the
+  # toolchain the images use. Env beats rust-toolchain.toml.
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  # The tag IS the version claim — refuse to release a tree that disagrees.
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches workspace version
+        run: |
+          set -eu
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          [ "$want" = "$have" ] || {
+            echo "tag v$want but workspace version is $have"; exit 1; }
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            triple: aarch64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-gnu
+    name: build (${{ matrix.triple }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aws-lc-sys build deps (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Install aws-lc-sys build deps (macos)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p sovra-cosigner -p sovra-api -p sovra-cli
+      - name: Package
+        run: |
+          set -eu
+          name="sovra-${GITHUB_REF_NAME}-${{ matrix.triple }}"
+          mkdir "$name"
+          cp target/release/sovra-cosigner target/release/sovra-api target/release/sovra-cli "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.triple }}
+          path: |
+            sovra-*.tar.gz
+            sovra-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sovra-*.tar.gz
+            sovra-*.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            Binaries: `sovra-cosigner`, `sovra-api`, `sovra-cli` per platform.
+            Linux tarballs need glibc ≥ 2.39 (Ubuntu 24.04+) — for anything
+            else, use the Docker images: `ghcr.io/pierreossun/sovra-{cosigner,api,cli}`.
+            Verify: `shasum -a 256 -c <file>.sha256`.

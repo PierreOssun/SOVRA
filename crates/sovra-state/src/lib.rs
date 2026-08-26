@@ -166,13 +166,24 @@ fn read_or_not_found(path: &Path, id: &SignerId) -> Result<Vec<u8>, StateError> 
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    write_atomic_mode(path, bytes, 0o600)
+}
+
+/// [`write_atomic`] for PUBLIC material (certificates, CSRs): world-readable,
+/// so a container running as a different uid than the provisioner can still
+/// load it. Never use for keys or shards.
+pub fn write_atomic_public(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    write_atomic_mode(path, bytes, 0o644)
+}
+
+fn write_atomic_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<(), StateError> {
     let dir = path.parent().expect("file path must have a parent");
     let tmp = dir.join(format!(
         ".tmp-{}",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("f")
     ));
     std::fs::write(&tmp, bytes).at(&tmp)?;
-    // perms before rename, so the file is never briefly world-readable
-    set_mode(&tmp, 0o600)?;
+    // perms before rename, so a secret file is never briefly world-readable
+    set_mode(&tmp, mode)?;
     std::fs::rename(&tmp, path).at(path)
 }

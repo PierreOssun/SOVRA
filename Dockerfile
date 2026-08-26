@@ -34,7 +34,7 @@ LABEL org.opencontainers.image.description="Sovra — self-hosted MPC signer for
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --home-dir /opt/sovra --shell /usr/sbin/nologin sovra \
+    && useradd --system --uid 999 --home-dir /opt/sovra --shell /usr/sbin/nologin sovra \
     && install -d -o sovra -g sovra /opt/sovra /opt/sovra/config /opt/sovra/certs /opt/sovra/data
 # Relative config/cert paths resolve from here — same load-bearing
 # WorkingDirectory the systemd unit had.

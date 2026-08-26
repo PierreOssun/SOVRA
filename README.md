@@ -16,6 +16,8 @@ Built for Ethereum (for now :) ).
 
 ## Quickstart
 
+### Try it: one machine, one command
+
 One machine, one command to a signing MPC wallet (Docker required) — a
 taste, not a custody setup, since one host holds every shard:
 
@@ -25,10 +27,17 @@ mkdir sovra-demo && cd sovra-demo
 sovra init demo && sovra up
 # → { "addresses": { "ethereum": "0x…" } }   API on http://127.0.0.1:3000
 ```
+`RUN.md` for more detailed info about the local dev flow.
 
-The real thing — shards on separate machines you own — is the same launcher
-with three roles (`cloud`, `pi`, `mac`) and two commands per host plus one
-roster paste. Follow `DEPLOY_RUNBOOK.md`; `RUN.md` covers the local dev flow.
+### Deploy it: every shard on a separate machine
+
+Every shard on separate machines you own. It uses the same launcher
+with three roles:
+- `cloud`: any Linux VM, holds one sealed shard and nothing else    
+- `pi`: aarch64, second shard    
+- `mac`: your Apple-silicon laptop, running the orchestrator plus the sleeping recovery shard     
+
+Follow `DEPLOY_RUNBOOK.md` 
 
 ## 1. Architecture
 
@@ -106,14 +115,13 @@ Response: `200 { tx_hash, status: "confirmed", block_number, gas_used, execution
 - Take a tx hash to sign a Sepolia transaction - DKLs23 rounds
 - Broadcast it – using a public RPC
 - Be verifiable on Etherscan
-- Shards on different machines: one on a raspberry pi, one local, and the cold recovery shard hosted on cloud (for demo purposes)
+- Shards on different machines: one on an always-on cloud box, one on a raspberry pi, and the cold recovery shard on your own machine beside the orchestrator
 
 ## Out of scope, for now
 
 These are deliberate deferrals, not gaps:
 
 - API authentication, authorization, rate limiting
-- Share encryption at rest (filesystem permissions only for PoC)
 - TLS certificate lifecycle (rotation, revocation)
 - Concurrent signing sessions (global lock for PoC)
 - Observability backend (local JSON logs only)

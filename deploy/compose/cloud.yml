@@ -1,17 +1,15 @@
-# The cloud host: orchestrator + cosigner 0. Fill .env (see cloud.env.example),
-# then `docker compose -f cloud.yml up -d`.
-#
-# network_mode: host on purpose — processes bind the host's ports directly,
-# so the fleet's mTLS certs keep their tailscale-IP SANs and nothing about
-# the wire differs from the bare-metal deployment. The public API stays
-# loopback-only (bind_addr default); only :3100 (relay) and :4100 (control)
-# face the tailnet.
+# The always-on rented box: cosigner 0 and nothing else — it holds exactly
+# one (sealed) shard, no orchestrator, no policy authority beyond its own.
+# Fill .env (see cloud.env.example), then `docker compose -f cloud.yml up -d`.
+# See mac.yml for the host-networking and SOVRA_UID rationale; :4100 is the
+# only port facing the tailnet.
 name: sovra-cloud
 
 services:
   cosigner0:
     image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
     network_mode: host
+    user: "${SOVRA_UID:?run 'sovra init cloud' to write SOVRA_UID into .env}"
     restart: unless-stopped
     environment:
       SOVRA_COSIGNER_PARTY_ID: "0"
@@ -21,19 +19,15 @@ services:
       SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
       SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner0.cert.pem
       SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner0.key.pem
-      SOVRA_COSIGNER_RELAY_URL: wss://${CLOUD_TS_IP}:3100/env
-      # Empty until the roster ceremony (`sovra roster`); empty = bootstrap
-      # mode, where only GET /identity serves.
+      SOVRA_COSIGNER_RELAY_URL: wss://${MAC_TS_IP}:3100/env
       SOVRA_COSIGNER_PARTICIPANTS: ${SOVRA_PARTICIPANTS:-}
-      # Uncomment to seal the shard at rest (openssl rand -hex 32 > seal0.key):
-      # SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal0.key
+      # Sealed at rest by default; `sovra init` seeds the key.
+      SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal0.key
     volumes:
-      - data0:/opt/sovra/data
+      - ./data:/opt/sovra/data
       - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
       - ${SOVRA_CONFIG_DIR:-./config}:/opt/sovra/config:ro
     healthcheck:
-      # /health is mTLS like every internal socket — the probe presents the
-      # party's own leaf (mounted anyway) against 127.0.0.1 (in every SAN).
       test:
         [
           "CMD-SHELL",
@@ -43,34 +37,3 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-
-  api:
-    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-api:${SOVRA_TAG:-latest}
-    network_mode: host
-    restart: unless-stopped
-    # Local ordering only — the Pi and Mac parties are remote. If they are
-    # not up yet, the api exits after its ~10s startup-recovery grace and
-    # `restart` brings it back until the fleet is ready.
-    depends_on:
-      cosigner0:
-        condition: service_healthy
-    environment:
-      SOVRA_RPC_URL: ${SOVRA_RPC_URL}
-      # Preference order — the cold recovery party (Mac) goes LAST.
-      SOVRA_COSIGNER_URLS: 0=https://${CLOUD_TS_IP}:4100,1=https://${PI_TS_IP}:4101,2=https://${MAC_TS_IP}:4102
-      SOVRA_THRESHOLD: "2"
-      SOVRA_RELAY_BIND: 0.0.0.0:3100
-      SOVRA_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
-      SOVRA_TLS_CERT_PATH: /opt/sovra/certs/orchestrator.cert.pem
-      SOVRA_TLS_KEY_PATH: /opt/sovra/certs/orchestrator.key.pem
-    volumes:
-      - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
-    healthcheck:
-      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3000/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-
-volumes:
-  data0:

@@ -15,7 +15,9 @@ CONFIG=/opt/sovra/config
 #    SANs are harmless inside a single-CA closed system.
 sovra-cli certs ca --dir "$CERTS"
 for n in orchestrator cosigner0 cosigner1 cosigner2; do
-  sovra-cli certs csr --dir "$CERTS" --stem "$n" --cn "sovra-$n" \
+  # CN convention matches xtask's ensure_leaf: sovra-cosigner-<id>.
+  cn="sovra-$(echo "$n" | sed 's/^cosigner/cosigner-/')"
+  sovra-cli certs csr --dir "$CERTS" --stem "$n" --cn "$cn" \
     --san api --san cosigner0 --san cosigner1 --san cosigner2
   sovra-cli certs sign "$CERTS/$n.csr.pem" --dir "$CERTS"
 done

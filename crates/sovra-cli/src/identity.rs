@@ -2,9 +2,10 @@
 //! minting `data_dir/identity.key` on first run — so provisioning (compose
 //! init, `sovra roster`) can know a party's key BEFORE its cosigner ever
 //! starts. Mirrors sovra-cosigner's `identity::load_or_generate` contract
-//! exactly (raw 32 bytes, 0600, refuse a wrong-sized file) without pulling
-//! the whole cosigner crate into the CLI; the format is pinned on both sides
-//! by that shared rule.
+//! exactly (raw 32 bytes, 0600, atomic write, refuse a wrong-sized file)
+//! without pulling the whole cosigner crate into the CLI; both sides go
+//! through `sovra_state::write_atomic`, so the on-disk behavior cannot
+//! drift.
 
 use std::{path::Path, process::ExitCode};
 
@@ -42,17 +43,7 @@ fn load_or_generate(data_dir: &Path) -> Result<SigningKey, String> {
     } else {
         std::fs::create_dir_all(data_dir).map_err(|e| format!("{}: {e}", data_dir.display()))?;
         let key = SigningKey::generate(&mut rand::rngs::OsRng);
-        write_0600(&path, key.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+        sovra_state::write_atomic(&path, key.as_bytes()).map_err(|e| e.to_string())?;
         Ok(key)
     }
-}
-
-fn write_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(bytes)
 }

@@ -20,13 +20,14 @@ CSR enrollment (§2), identity keys at first boot.
 
 | Host | Role (`sovra init <role>`) | Runs | Reachability needed |
 |---|---|---|---|
-| always-on box ("cloud") | `cloud` | `sovra-api` (:3000 loopback + relay hub :3100), cosigner 0 | cosigners dial `wss://<CLOUD_TS_IP>:3100/env` |
+| your Mac | `mac` | `sovra-api` (:3000 loopback + relay hub :3100) and cosigner 2 — the **sleeping shard**, woken for ceremonies (`sovra wake`) | cosigners dial `wss://<MAC_TS_IP>:3100/env` |
+| always-on box ("cloud") | `cloud` | cosigner 0 — one sealed shard, nothing else | orchestrator dials `https://<CLOUD_TS_IP>:4100` |
 | Raspberry Pi | `pi` | cosigner 1 | orchestrator dials `https://<PI_TS_IP>:4101` |
-| Mac (mostly offline) | `mac` | cosigner 2 — the **sleeping shard**, up for ceremonies only | orchestrator dials `https://<MAC_TS_IP>:4102` when awake |
 
-Two-machine variant: the Mac can double as the cloud host (run `cloud` and
-`mac` roles in two directories on it) — that reproduces the original
-Mac + Pi demo.
+The orchestrator lives on YOUR machine on purpose: it holds no shard, and
+signing happens exactly when you are at the keyboard — the rented box holds
+nothing but one encrypted shard. Two-machine variant: the cloud role can run
+on the Mac too (a second directory) for a Mac + Pi setup.
 
 Reachability is **bidirectional** (control plane in, relay plane out), and
 the machines sit behind NAT — so all join a **Tailscale** tailnet. mTLS
@@ -49,7 +50,7 @@ Then on every host, in a fresh directory:
 
 ```bash
 sovra init <cloud|pi|mac>     # fetches <role>.yml + a .env template
-vi .env                       # fill in the tailscale IPs (and RPC URL on cloud)
+vi .env                       # fill in the tailscale IPs (and RPC URL on the mac)
 ```
 
 ## 2. Certificates (CSR enrollment — private keys never travel)
@@ -66,8 +67,8 @@ On the Mac (once):
 sovra certs new                          # mints certs/ca.{cert,key}.pem
 ```
 
-On every host (generates the keypair + CSR for that host's role — the cloud
-role produces two, orchestrator + cosigner0):
+On every host (generates the keypair + CSR for that host's role — the mac
+role produces two, orchestrator + cosigner2):
 
 ```bash
 sovra certs csr                          # uses MY_TS_IP from .env as the SAN
@@ -86,10 +87,11 @@ Each host ends with `certs/` holding `ca.cert.pem` + its own
 `<stem>.cert.pem` + `<stem>.key.pem` (the key never moved). `sovra check`
 names anything missing.
 
-Shard sealing (recommended for the Pi and the sleeping shard — their disks
-leave your desk): `openssl rand -hex 32 > certs/seal1.key` **before the first
-DKG**, and uncomment the `SEAL_KEY_PATH` line in the role's yml. Keep the
-seal key out of the same backup as the data volume, or the seal adds nothing.
+Shard sealing is ON by default: `sovra init` seeded `certs/sealN.key`, and
+every shard is XChaCha20-Poly1305 sealed at rest from the first DKG (it must
+exist before then — sealing can't be added to an existing plaintext shard
+without a refresh ceremony; `sovra check` verifies it). Keep the seal key
+out of the same backup as `data/`, or the seal adds nothing.
 
 ## 3. Bring the fleet up (bootstrap mode)
 
@@ -103,8 +105,8 @@ sovra up
 
 First boot is **bootstrap mode** (no roster yet): the cosigner serves
 `GET /identity` and 409s everything else. That is correct at this stage. The
-cloud host's `sovra-api` container will restart-loop until the whole fleet
-is up — also correct; it goes quiet once §5 completes.
+Mac's `sovra-api` container will restart-loop until the whole fleet is up —
+also correct; it goes quiet once §5 completes.
 
 Policies: `sovra init` seeded `config/policyN.toml` for this party —
 **review and edit it** (allowed recipients, value cap); the grammar is
@@ -122,7 +124,7 @@ named remedy per gap:
 sovra check
 #   ✓ docker
 #   ✓ leaf cosigner1
-#   ✗ SOVRA_PARTICIPANTS empty (bootstrap only — run 'sovra roster' on the cloud machine, paste here)
+#   ✗ SOVRA_PARTICIPANTS empty (bootstrap only — run 'sovra roster' on the mac, paste here)
 #   ✓ relay hub reachable (mTLS)
 ```
 
@@ -131,7 +133,7 @@ flow and would spawn colliding local cosigners with stale identities.
 
 ## 5. Roster ceremony (verifying-key exchange)
 
-With all three parties up in bootstrap mode, on the cloud machine:
+With all three parties up in bootstrap mode, on the Mac:
 
 ```bash
 sovra roster
@@ -153,8 +155,8 @@ surfaces that named error from the logs instead of hanging.
 
 ## 6. DKG ceremony
 
-DKG needs **all three** parties online (wake the Mac: `sovra up` there). On
-the cloud machine:
+DKG needs **all three** parties online (`sovra wake` on the Mac if the
+sleeping shard is down). On the Mac:
 
 ```bash
 sovra check      # every party must show "reachable (mTLS)"
@@ -164,22 +166,23 @@ sovra dkg
 
 Timing is safe over Tailscale: the MPC ttl is 60 s and the orchestrator's
 HTTP timeout 90 s, against tens of milliseconds of added RTT. A `409` means
-a shard already exists — to redo, wipe every party's data volume
-(`docker volume rm <role>_dataN` with the fleet down) and re-run.
+a shard already exists — to redo: `sovra down && rm -rf data/store` on every
+party, then re-run.
 
-Verify the shard was born on the Pi:
+Verify the shard was born on the Pi (`data/` is a plain host directory —
+your user owns it):
 
 ```bash
-sovra logs cosigner1                                    # DKLs23 rounds ran here
-docker compose -f pi.yml exec cosigner1 ls -la /opt/sovra/data/default/
-# shard.bin + metadata.json — sealed (SVR1 prefix) if seal_key is configured
-curl -s http://127.0.0.1:3000/v1/dkg                    # (cloud) same address
+sovra logs cosigner1                # DKLs23 rounds ran here
+ls -la data/store/default/          # (Pi) shard.bin + metadata.json,
+                                    #  shard sealed (SVR1 prefix)
+curl -s http://127.0.0.1:3000/v1/dkg   # (Mac) same address as the ceremony
 ```
 
-Then put the sleeping shard to sleep: `sovra down` on the Mac — **after
-taking its offline backup** (the data volume: shard + identity.key — this is
-the scheme's seedphrase-equivalent; re-take it after every ceremony, and
-keep the seal key in a separate location).
+Then put the sleeping shard back to sleep: `sovra sleep` on the Mac —
+**after taking its offline backup** (the `data/` directory: shard +
+identity.key — this is the scheme's seedphrase-equivalent; re-take it after
+every ceremony, and keep `certs/seal2.key` in a separate location).
 
 ## 7. Demo
 
@@ -188,8 +191,8 @@ confirm on sepolia.etherscan.io. Unfunded, a non-zero `--value` fails at
 `prepare` with `502 rpc enrichment failed` (the node refuses to estimate gas
 for a spend the address can't cover).
 
-The API is loopback-only on the cloud host, so run the CLI there — release
-binary, or the image:
+The API is loopback-only on the Mac — your machine — so run the CLI right
+there: release binary, or the image:
 
 ```bash
 alias sovra-cli='docker run --rm --network host ghcr.io/pierreossun/sovra-cli:latest'
@@ -208,7 +211,7 @@ sovra-cli prepare --to 0x000000000000000000000000000000000000dEaD --value 100000
 
 Worth showing side by side:
 - the Pi's `sovra logs -f cosigner1` participating in the DKLs23 rounds;
-- the orchestrator log (`sovra logs -f api` on cloud) selecting
+- the orchestrator log (`sovra logs -f api` on the Mac) selecting
   `participants=[0, 1]`;
 - the `tx_hash` landing on sepolia.etherscan.io.
 
@@ -228,15 +231,15 @@ sovra-cli prepare --to 0x000000000000000000000000000000000000dEaD --value 0 --da
 **Failover (optional)** — kill the Pi mid-demo:
 
 ```bash
-# Pi:   sovra down
-# Mac:  sovra up            # wake the sleeping shard
-# cloud: sign again → orchestrator selects participants=[0, 2]
-# Pi:   sovra up            # afterwards; Mac: sovra down again
+# Pi:  sovra down
+# Mac: sovra wake           # wake the sleeping shard
+#      sign again → orchestrator selects participants=[0, 2]
+# Pi:  sovra up             # afterwards; Mac: sovra sleep
 ```
 
 A *lost* Pi shard is not healed in place: keep signing on {0, 2}, then
-migrate — wipe all data volumes, fresh DKG, move funds (see `RUN.md`,
-"Recovery runbook").
+migrate — `sovra down && rm -rf data/store` on every party, fresh DKG, move
+funds (see `RUN.md`, "Recovery runbook").
 
 ## 8. Troubleshooting
 
@@ -244,12 +247,12 @@ migrate — wipe all data volumes, fresh DKG, move funds (see `RUN.md`,
 |---|---|
 | `sovra check` fails | Read the ✗ lines — each names its remedy |
 | TLS hostname/`NotValidForName` errors | Dialed IP missing from the peer leaf's SANs → `MY_TS_IP` wrong in `.env` at csr time → re-enroll that leaf (§2; delete the stale `.csr/.key` pair first) |
-| api container restart-loops | A configured cosigner unreachable — expected until the whole fleet is up; if it persists, `sovra check` on cloud names the dead party |
+| api container restart-loops | A configured cosigner unreachable — expected until the whole fleet is up; if it persists, `sovra check` on the Mac names the dead party |
 | `dkg`/`sign` return 409 "roster" | `SOVRA_PARTICIPANTS` missing or differing on some host → §5, byte-identical everywhere, `sovra start` |
 | Cosigner unhealthy after `sovra start` | Own key not at index `party_id` in the roster — `sovra start` prints the boot self-check error from the logs |
 | `prepare` → `502 rpc enrichment failed` | Unfunded signer (non-zero value), or flaky public RPC → fund the address; set a dedicated `SOVRA_RPC_URL` in cloud's `.env` |
 | `broadcast` → `202 pending` | Not an error — check the tx hash on Etherscan |
-| Host reboot, nothing signs | `restart: unless-stopped` brings the containers back; `sovra check` on cloud to confirm the fleet, then sign |
+| Host reboot, nothing signs | `restart: unless-stopped` brings the containers back; `sovra check` on the Mac to confirm the fleet, then sign |
 
 Known-tight timings (fine over Tailscale, watch on slow links): MPC ttl 60 s,
 orchestrator HTTP timeout 90 s, broadcast receipt window 30 s (hard-coded).

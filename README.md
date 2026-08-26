@@ -106,14 +106,13 @@ Response: `200 { tx_hash, status: "confirmed", block_number, gas_used, execution
 - Take a tx hash to sign a Sepolia transaction - DKLs23 rounds
 - Broadcast it – using a public RPC
 - Be verifiable on Etherscan
-- Shards on different machines: one on a raspberry pi, one local, and the cold recovery shard hosted on cloud (for demo purposes)
+- Shards on different machines: one on an always-on cloud box, one on a raspberry pi, and the cold recovery shard on your own machine beside the orchestrator
 
 ## Out of scope, for now
 
 These are deliberate deferrals, not gaps:
 
 - API authentication, authorization, rate limiting
-- Share encryption at rest (filesystem permissions only for PoC)
 - TLS certificate lifecycle (rotation, revocation)
 - Concurrent signing sessions (global lock for PoC)
 - Observability backend (local JSON logs only)

@@ -119,7 +119,7 @@ pub fn ensure_ca(dir: &Path) -> Result<Ca, CertsError> {
             (params.not_before, params.not_after) = validity(CA_VALIDITY_DAYS);
             let cert = params.self_signed(&key)?;
             sovra_state::write_atomic(&key_path, key.serialize_pem().as_bytes())?;
-            sovra_state::write_atomic(&cert_path, cert.pem().as_bytes())?;
+            sovra_state::write_atomic_public(&cert_path, cert.pem().as_bytes())?;
             Ok(Ca {
                 issuer: Issuer::new(params, key),
             })
@@ -165,7 +165,7 @@ pub fn ensure_leaf(
             (params.not_before, params.not_after) = validity(LEAF_VALIDITY_DAYS);
             let cert = params.signed_by(&key, &ca.issuer)?;
             sovra_state::write_atomic(&key_path, key.serialize_pem().as_bytes())?;
-            sovra_state::write_atomic(&cert_path, cert.pem().as_bytes())?;
+            sovra_state::write_atomic_public(&cert_path, cert.pem().as_bytes())?;
         }
         (true, false) => return Err(half_present(dir, &cert_file, &key_file)),
         (false, true) => return Err(half_present(dir, &key_file, &cert_file)),
@@ -215,7 +215,8 @@ pub fn generate_csr(
                 .push(DnType::CommonName, common_name);
             let csr = params.serialize_request(&key)?;
             sovra_state::write_atomic(&key_path, key.serialize_pem().as_bytes())?;
-            sovra_state::write_atomic(&csr_path, csr.pem()?.as_bytes())?;
+            // The CSR is public by design — it travels to the CA machine.
+            sovra_state::write_atomic_public(&csr_path, csr.pem()?.as_bytes())?;
         }
         (true, false) => return Err(half_present(dir, &csr_file, &key_file)),
         (false, true) => return Err(half_present(dir, &key_file, &csr_file)),

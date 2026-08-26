@@ -12,6 +12,7 @@ sovra-certs = { workspace = true }
 # `identity` verb: same key type the cosigner pins.
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+sovra-state = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }

@@ -1,12 +1,13 @@
 # The Pi: cosigner 1. Fill .env (see pi.env.example), then
-# `docker compose -f pi.yml up -d`. See cloud.yml for the host-networking
-# rationale; :4101 is the only port facing the tailnet.
+# `docker compose -f pi.yml up -d`. See mac.yml for the host-networking and
+# SOVRA_UID rationale; :4101 is the only port facing the tailnet.
 name: sovra-pi
 
 services:
   cosigner1:
     image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
     network_mode: host
+    user: "${SOVRA_UID:?run 'sovra init pi' to write SOVRA_UID into .env}"
     restart: unless-stopped
     environment:
       SOVRA_COSIGNER_PARTY_ID: "1"
@@ -16,12 +17,13 @@ services:
       SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
       SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner1.cert.pem
       SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner1.key.pem
-      SOVRA_COSIGNER_RELAY_URL: wss://${CLOUD_TS_IP}:3100/env
+      SOVRA_COSIGNER_RELAY_URL: wss://${MAC_TS_IP}:3100/env
       SOVRA_COSIGNER_PARTICIPANTS: ${SOVRA_PARTICIPANTS:-}
-      # The Pi's shard leaves your desk — sealing recommended:
-      # SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal1.key
+      # Sealed at rest by default; `sovra init` seeds the key. The SD card
+      # leaves your desk — this is the shard the sealing exists for.
+      SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal1.key
     volumes:
-      - data1:/opt/sovra/data
+      - ./data:/opt/sovra/data
       - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
       - ${SOVRA_CONFIG_DIR:-./config}:/opt/sovra/config:ro
     healthcheck:
@@ -34,6 +36,3 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-
-volumes:
-  data1:

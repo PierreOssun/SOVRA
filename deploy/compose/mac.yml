@@ -1,17 +1,46 @@
-# The sleeping shard (cosigner 2). NOT `restart: unless-stopped` — this
-# party runs on demand: DKG and refresh ceremonies need it up; normal signing
-# should find it stopped (it is drawn in automatically only when an active
-# party is down). `docker compose -f mac.yml up -d` to wake, `down` to sleep.
+# The user's machine: orchestrator (sovra-api) + the sleeping shard
+# (cosigner 2). The API is on whenever you sign — which is exactly when this
+# machine is on; cosigner 2 wakes for ceremonies only (`sovra wake`/`sleep`).
+# Fill .env (see mac.env.example), then `docker compose -f mac.yml up -d`.
 #
-# Its data volume is the scheme's seedphrase-equivalent: back it up offline
-# after every ceremony (shard + identity.key; keep the seal key elsewhere).
+# network_mode: host on purpose — processes bind the host's ports directly,
+# so the fleet's mTLS certs keep their tailscale-IP SANs and nothing about
+# the wire differs from a bare-metal deployment. The public API stays
+# loopback-only (:3000); :3100 (relay) and :4102 (control) face the tailnet.
+# Containers run as YOUR uid (SOVRA_UID, written by `sovra init`) so the
+# host-owned certs/, config/ and data/ need no ownership dance.
 name: sovra-mac
 
 services:
+  api:
+    image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-api:${SOVRA_TAG:-latest}
+    network_mode: host
+    user: "${SOVRA_UID:?run 'sovra init mac' to write SOVRA_UID into .env}"
+    restart: unless-stopped
+    environment:
+      SOVRA_RPC_URL: ${SOVRA_RPC_URL}
+      # Preference order — the sleeping shard (this machine) goes LAST.
+      SOVRA_COSIGNER_URLS: 0=https://${CLOUD_TS_IP}:4100,1=https://${PI_TS_IP}:4101,2=https://${MAC_TS_IP}:4102
+      SOVRA_THRESHOLD: "2"
+      SOVRA_RELAY_BIND: 0.0.0.0:3100
+      SOVRA_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
+      SOVRA_TLS_CERT_PATH: /opt/sovra/certs/orchestrator.cert.pem
+      SOVRA_TLS_KEY_PATH: /opt/sovra/certs/orchestrator.key.pem
+    volumes:
+      - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # No `depends_on`: the API must serve while this party sleeps.
   cosigner2:
     image: ${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cosigner:${SOVRA_TAG:-latest}
     network_mode: host
-    restart: "no"
+    user: "${SOVRA_UID:?run 'sovra init mac' to write SOVRA_UID into .env}"
+    restart: "no" # the sleeping shard: awake for ceremonies, down otherwise
     environment:
       SOVRA_COSIGNER_PARTY_ID: "2"
       SOVRA_COSIGNER_BIND_ADDR: 0.0.0.0:4102
@@ -20,12 +49,14 @@ services:
       SOVRA_COSIGNER_TLS_CA_PATH: /opt/sovra/certs/ca.cert.pem
       SOVRA_COSIGNER_TLS_CERT_PATH: /opt/sovra/certs/cosigner2.cert.pem
       SOVRA_COSIGNER_TLS_KEY_PATH: /opt/sovra/certs/cosigner2.key.pem
-      SOVRA_COSIGNER_RELAY_URL: wss://${CLOUD_TS_IP}:3100/env
+      SOVRA_COSIGNER_RELAY_URL: wss://${MAC_TS_IP}:3100/env
       SOVRA_COSIGNER_PARTICIPANTS: ${SOVRA_PARTICIPANTS:-}
-      # The cold shard should be sealed at rest:
-      # SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal2.key
+      # Sealed at rest by default; `sovra init` seeds the key. The data dir
+      # (shard + identity.key) is the scheme's seedphrase-equivalent — back
+      # it up offline after every ceremony, WITHOUT the seal key.
+      SOVRA_COSIGNER_SEAL_KEY_PATH: /opt/sovra/certs/seal2.key
     volumes:
-      - data2:/opt/sovra/data
+      - ./data:/opt/sovra/data
       - ${SOVRA_CERTS_DIR:-./certs}:/opt/sovra/certs:ro
       - ${SOVRA_CONFIG_DIR:-./config}:/opt/sovra/config:ro
     healthcheck:
@@ -38,6 +69,3 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-
-volumes:
-  data2:

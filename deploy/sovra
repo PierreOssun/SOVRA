@@ -3,23 +3,24 @@
 # sovra-cli so a host needs exactly: docker, this script, and a filled .env.
 #
 # Per-machine flow (see DEPLOY_RUNBOOK.md):
-#   sovra init <cloud|pi|mac|demo>   fetch role files here, then edit .env
-#   sovra certs ...                  CA machine: new + sign; every host: csr
+#   sovra init <mac|cloud|pi|demo>   fetch role files here, then edit .env
+#   sovra certs ...                  CA machine (mac): new + sign; every host: csr
 #   sovra up                         provision + run; cosigners in bootstrap
 #                                    mode print their identity key
-#   sovra roster                     (cloud) collect identities -> the
+#   sovra roster                     (mac) collect identities -> the
 #                                    SOVRA_PARTICIPANTS line to paste
 #   sovra start                      validate .env against the wire, go live
 #   sovra check                      the validation alone (doctor)
-#   sovra dkg                        (cloud) mint the wallet
+#   sovra dkg                        (mac) mint the wallet
+#   sovra wake | sleep               (mac) start/stop the sleeping shard
 #
 # Everything stateful lives in the CURRENT DIRECTORY: <role>.yml, .env,
-# certs/, config/. The script is glue — all real behavior is in the
-# containers and their named errors.
+# certs/, config/, data/ — all owned by YOUR user (containers run as your
+# uid). The script is glue — all real behavior is in the containers and
+# their named errors.
 set -euo pipefail
 
 RAW_BASE="${SOVRA_COMPOSE_DIR:-https://raw.githubusercontent.com/PierreOssun/SOVRA/main/deploy/compose}"
-CLI_IMAGE="${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cli:${SOVRA_TAG:-latest}"
 
 die() { echo "sovra: $*" >&2; exit 1; }
 ok()  { echo "  ✓ $*"; }
@@ -27,16 +28,16 @@ bad() { echo "  ✗ $*"; FAILED=1; }
 
 # ---------- role wiring ----------
 load_env() {
-  [ -f .env ] || die "no .env here — run 'sovra init <cloud|pi|mac|demo>' first"
+  [ -f .env ] || die "no .env here — run 'sovra init <mac|cloud|pi|demo>' first"
   set -a; . ./.env; set +a
   ROLE="${SOVRA_ROLE:-}"
   [ -n "$ROLE" ] || die ".env has no SOVRA_ROLE (re-run 'sovra init')"
   COMPOSE="docker compose -f $ROLE.yml"
   CERTS_DIR="${SOVRA_CERTS_DIR:-./certs}"
   case "$ROLE" in
-    cloud) STEMS="orchestrator cosigner0"; PARTY=0; PORT=4100; MY_IP="${CLOUD_TS_IP:-}" ;;
+    mac)   STEMS="orchestrator cosigner2"; PARTY=2; PORT=4102; MY_IP="${MAC_TS_IP:-}" ;;
+    cloud) STEMS="cosigner0";              PARTY=0; PORT=4100; MY_IP="${MY_TS_IP:-}" ;;
     pi)    STEMS="cosigner1";              PARTY=1; PORT=4101; MY_IP="${MY_TS_IP:-}" ;;
-    mac)   STEMS="cosigner2";              PARTY=2; PORT=4102; MY_IP="${MY_TS_IP:-}" ;;
     demo)  STEMS=""; PARTY=""; PORT=""; MY_IP="" ;;
     *) die "unknown SOVRA_ROLE '$ROLE'" ;;
   esac
@@ -49,13 +50,17 @@ fetch() { # fetch <name> — from the repo (or SOVRA_COMPOSE_DIR for local dev)
   esac
 }
 
-cli() { # containerized sovra-cli against ./certs — no Rust toolchain needed
+# Containerized sovra-cli against ./certs. The image tag is resolved HERE,
+# after load_env, so a SOVRA_TAG pinned in .env applies to provisioning
+# exactly like compose applies it to the fleet.
+cli() {
   docker run --rm --user "$(id -u)" -v "$(cd "$CERTS_DIR" && pwd)":/w -w /w \
-    --entrypoint sovra-cli "$CLI_IMAGE" "$@"
+    --entrypoint sovra-cli \
+    "${SOVRA_IMAGE:-ghcr.io/pierreossun/sovra}-cli:${SOVRA_TAG:-latest}" "$@"
 }
 
-# mTLS curl with this host's own leaf (first stem) — how the launcher talks
-# to anything internal.
+# mTLS curl with this host's own leaf (first stem). -f: only for endpoints
+# expected to answer 200.
 mcurl() { # mcurl <url> [curl args...]
   local url="$1"; shift
   local stem; stem=$(echo "$STEMS" | cut -d' ' -f1)
@@ -63,10 +68,22 @@ mcurl() { # mcurl <url> [curl args...]
     --cert "$CERTS_DIR/$stem.cert.pem" --key "$CERTS_DIR/$stem.key.pem" "$@" "$url"
 }
 
+# Reachability-only probe: succeeds on ANY HTTP response (the relay's /env
+# is WebSocket-only and 4xxes a plain GET — that still proves TCP + mTLS);
+# fails only on connect/TLS errors.
+probe_tls() { # probe_tls <url>
+  local stem; stem=$(echo "$STEMS" | cut -d' ' -f1)
+  curl -sS -m 5 -o /dev/null --cacert "$CERTS_DIR/ca.cert.pem" \
+    --cert "$CERTS_DIR/$stem.cert.pem" --key "$CERTS_DIR/$stem.key.pem" "$1" 2>/dev/null
+}
+
+# xtask's CN convention: cosigner1 -> sovra-cosigner-1.
+cn_of() { echo "sovra-$(echo "$1" | sed 's/^cosigner/cosigner-/')"; }
+
 # ---------- verbs ----------
 cmd_init() {
   local role="${1:-}"
-  case "$role" in cloud|pi|mac|demo) ;; *) die "usage: sovra init <cloud|pi|mac|demo>";; esac
+  case "$role" in mac|cloud|pi|demo) ;; *) die "usage: sovra init <mac|cloud|pi|demo>";; esac
   fetch "$role.yml"
   [ "$role" = demo ] && fetch demo-init.sh
   if [ ! -f .env ]; then
@@ -74,17 +91,29 @@ cmd_init() {
       printf 'SOVRA_ROLE=demo\n' > .env
     else
       fetch "$role.env.example"
-      { printf 'SOVRA_ROLE=%s\n' "$role"; cat "$role.env.example"; } > .env
+      # SOVRA_UID: the fleet containers run as YOUR user, so the host-owned
+      # certs/config/data need no ownership dance on Linux.
+      { printf 'SOVRA_ROLE=%s\nSOVRA_UID=%s\n' "$role" "$(id -u)"; cat "$role.env.example"; } > .env
       rm "$role.env.example"
     fi
   fi
-  mkdir -p certs config
-  # Each cosigner refuses to boot without its policy — seed an editable one.
-  case "$role" in cloud) pn=0 ;; pi) pn=1 ;; mac) pn=2 ;; *) pn="" ;; esac
-  if [ -n "$pn" ] && [ ! -f "config/policy$pn.toml" ]; then
-    fetch policy.example.toml
-    mv policy.example.toml "config/policy$pn.toml"
-    echo "seeded config/policy$pn.toml — REVIEW IT: it is this party's signing policy"
+  mkdir -p certs config data
+  case "$role" in mac) pn=2 ;; cloud) pn=0 ;; pi) pn=1 ;; *) pn="" ;; esac
+  if [ -n "$pn" ]; then
+    # Each cosigner refuses to boot without its policy — seed an editable one.
+    if [ ! -f "config/policy$pn.toml" ]; then
+      fetch policy.example.toml
+      mv policy.example.toml "config/policy$pn.toml"
+      echo "seeded config/policy$pn.toml — REVIEW IT: it is this party's signing policy"
+    fi
+    # Shards are sealed at rest by default; the key must exist BEFORE the
+    # first DKG (sealing can't be added to an existing plaintext shard
+    # without a refresh ceremony). Keep it OUT of the data/ backup.
+    if [ ! -f "certs/seal$pn.key" ]; then
+      od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "certs/seal$pn.key"
+      chmod 600 "certs/seal$pn.key"
+      echo "seeded certs/seal$pn.key (shard sealing key — back it up separately from data/)"
+    fi
   fi
   echo "initialized '$role' in $(pwd)"
   [ "$role" = demo ] && echo "next: sovra up" || echo "next: edit .env, then sovra certs / sovra up"
@@ -96,12 +125,19 @@ cmd_certs() {
     new)  cli certs ca --dir /w ;;
     csr)  [ -n "$MY_IP" ] || die "set this host's tailscale IP in .env first"
           for stem in $STEMS; do
-            cli certs csr --dir /w --stem "$stem" --cn "sovra-$stem" --san "$MY_IP"
+            cli certs csr --dir /w --stem "$stem" --cn "$(cn_of "$stem")" --san "$MY_IP"
           done
           echo "send the .csr.pem file(s) in $CERTS_DIR to the CA machine" ;;
-    sign) [ -n "${2:-}" ] || die "usage: sovra certs sign <file.csr.pem>"
-          cp "$2" "$CERTS_DIR/" 2>/dev/null || true
-          cli certs sign "/w/$(basename "$2")" --dir /w ;;
+    sign) local src="${2:-}"
+          [ -n "$src" ] || die "usage: sovra certs sign <file.csr.pem>"
+          [ -f "$src" ] || die "no such CSR: $src"
+          local base; base=$(basename "$src")
+          cp "$src" "$CERTS_DIR/$base" 2>/dev/null || true
+          # Never sign a stale same-named CSR: what's in certs/ must be
+          # byte-identical to the file the operator pointed at.
+          cmp -s "$src" "$CERTS_DIR/$base" \
+            || die "could not place $src into $CERTS_DIR (a different $base already there?)"
+          cli certs sign "/w/$base" --dir /w ;;
     *) die "usage: sovra certs <new|csr|sign>  (import = copy ca.cert.pem + your signed leaf into $CERTS_DIR)" ;;
   esac
 }
@@ -136,6 +172,8 @@ check_certs() {
   [ -f "$CERTS_DIR/ca.cert.pem" ] && ok "CA cert" || bad "certs/ca.cert.pem missing (import from the CA machine)"
   [ -f "config/policy$PARTY.toml" ] && ok "policy$PARTY.toml" \
     || bad "config/policy$PARTY.toml missing (this party's signing policy — 'sovra init' seeds a template)"
+  [ -f "$CERTS_DIR/seal$PARTY.key" ] && ok "seal$PARTY.key" \
+    || bad "certs/seal$PARTY.key missing (shard sealing key — 'sovra init' seeds it; must exist before the first DKG)"
   for stem in $STEMS; do
     if [ -f "$CERTS_DIR/$stem.cert.pem" ] && [ -f "$CERTS_DIR/$stem.key.pem" ]; then
       ok "leaf $stem"
@@ -148,7 +186,7 @@ check_certs() {
 check_roster() {
   local p="${SOVRA_PARTICIPANTS:-}"
   if [ -z "$p" ]; then
-    bad "SOVRA_PARTICIPANTS empty (bootstrap only — run 'sovra roster' on the cloud machine, paste here)"
+    bad "SOVRA_PARTICIPANTS empty (bootstrap only — run 'sovra roster' on the mac, paste here)"
   else
     local n; n=$(echo "$p" | tr ',' '\n' | grep -c .)
     [ "$n" = 3 ] && ok "roster has 3 keys" || bad "roster has $n keys, expected 3"
@@ -165,32 +203,36 @@ cmd_check() {
   check_certs
   check_roster
   case "$ROLE" in
-    cloud)
-      [ -n "${CLOUD_TS_IP:-}" ] && ok "CLOUD_TS_IP" || bad "CLOUD_TS_IP unset"
+    mac)
+      [ -n "${MAC_TS_IP:-}" ] && ok "MAC_TS_IP" || bad "MAC_TS_IP unset"
       [ -n "${SOVRA_RPC_URL:-}" ] || bad "SOVRA_RPC_URL unset"
       if [ -n "${SOVRA_RPC_URL:-}" ]; then
         curl -fsS -m 5 -o /dev/null -X POST -H 'content-type: application/json' \
           -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}' "$SOVRA_RPC_URL" \
           && ok "RPC reachable" || bad "RPC unreachable: $SOVRA_RPC_URL"
       fi
-      # The orchestrator's own preflight: every party answers /health on mTLS.
+      # The orchestrator's own preflight: the ACTIVE parties must answer
+      # /health on mTLS. The sleeping shard (cosigner2, this machine) being
+      # down is the normal steady state, never a failure.
       local i=0
       for ip in "${CLOUD_TS_IP:-}" "${PI_TS_IP:-}" "${MAC_TS_IP:-}"; do
         if [ -z "$ip" ]; then bad "party $i tailscale IP unset in .env"
         elif mcurl "https://$ip:$((4100 + i))/health" -m 5 -o /dev/null 2>/dev/null; then
           ok "cosigner$i reachable (mTLS)"
+        elif [ "$i" = 2 ]; then
+          ok "cosigner2 asleep (fine for signing; 'sovra wake' before dkg/refresh)"
         else
-          bad "cosigner$i unreachable at $ip:$((4100 + i)) (down, or not 'sovra up' yet — mac may be asleep on purpose)"
+          bad "cosigner$i unreachable at $ip:$((4100 + i)) (down, or not 'sovra up' yet?)"
         fi
         i=$((i + 1))
       done ;;
-    pi|mac)
-      [ -n "${CLOUD_TS_IP:-}" ] && ok "CLOUD_TS_IP" || bad "CLOUD_TS_IP unset"
+    cloud|pi)
+      [ -n "${MAC_TS_IP:-}" ] && ok "MAC_TS_IP" || bad "MAC_TS_IP unset (the orchestrator/relay host)"
       [ -n "$MY_IP" ] && ok "MY_TS_IP" || bad "MY_TS_IP unset (this host's tailscale IP — it goes in the cert SAN)"
-      if [ -n "${CLOUD_TS_IP:-}" ] && [ -f "$CERTS_DIR/ca.cert.pem" ]; then
-        mcurl "https://$CLOUD_TS_IP:3100/env" -m 5 -o /dev/null 2>/dev/null \
+      if [ -n "${MAC_TS_IP:-}" ] && [ -f "$CERTS_DIR/ca.cert.pem" ]; then
+        probe_tls "https://$MAC_TS_IP:3100/env" \
           && ok "relay hub reachable (mTLS)" \
-          || bad "relay hub unreachable at $CLOUD_TS_IP:3100 (cloud not up yet?)"
+          || bad "relay hub unreachable at $MAC_TS_IP:3100 (mac not 'sovra up' yet?)"
       fi ;;
   esac
   [ "$FAILED" = 0 ] && echo "all checks passed" || exit 1
@@ -200,10 +242,14 @@ cmd_start() {
   load_env
   [ "$ROLE" = demo ] && die "the demo needs only 'sovra up' (its ceremony is automatic)"
   cmd_check
+  load_env
   $COMPOSE up -d
   echo "waiting for health..."
+  local services="" unhealthy=""
+  # The sleeping shard is exempt: on mac, `start` waits for the api only.
+  [ "$ROLE" = mac ] && services="api"
   for _ in $(seq 1 12); do
-    unhealthy=$($COMPOSE ps --format '{{.Service}}={{.Health}}' | grep -v '=healthy' || true)
+    unhealthy=$($COMPOSE ps $services --format '{{.Service}}={{.Health}}' | grep -v '=healthy' || true)
     [ -z "$unhealthy" ] && { echo "live."; return; }
     sleep 5
   done
@@ -214,9 +260,9 @@ cmd_start() {
 
 cmd_roster() {
   load_env
-  [ "$ROLE" = cloud ] || die "'sovra roster' runs on the cloud machine (it holds every party's URL)"
+  [ "$ROLE" = mac ] || die "'sovra roster' runs on the mac (it holds every party's URL)"
   local keys="" i=0
-  for ip in "$CLOUD_TS_IP" "${PI_TS_IP:?PI_TS_IP unset in .env}" "${MAC_TS_IP:?MAC_TS_IP unset in .env}"; do
+  for ip in "${CLOUD_TS_IP:?CLOUD_TS_IP unset in .env}" "${PI_TS_IP:?PI_TS_IP unset in .env}" "$MAC_TS_IP"; do
     key=$(mcurl "https://$ip:$((4100 + i))/identity" -m 5 \
       | sed 's/.*"verifying_key":"\([^"]*\)".*/\1/') \
       || die "party $i at $ip did not answer /identity — is it 'sovra up'?"
@@ -229,7 +275,7 @@ cmd_roster() {
 
 cmd_dkg() {
   load_env
-  [ "$ROLE" = cloud ] || die "'sovra dkg' runs on the cloud machine"
+  [ "$ROLE" = mac ] || die "'sovra dkg' runs on the mac"
   curl -fsS -X POST http://127.0.0.1:3000/v1/dkg
   echo
 }
@@ -243,7 +289,9 @@ case "${1:-}" in
   check)  cmd_check ;;
   roster) cmd_roster ;;
   dkg)    cmd_dkg ;;
-  down)   load_env; $COMPOSE down ;;
+  wake)   load_env; [ "$ROLE" = mac ] || die "'sovra wake' runs on the mac"; $COMPOSE up -d cosigner2 ;;
+  sleep)  load_env; [ "$ROLE" = mac ] || die "'sovra sleep' runs on the mac"; $COMPOSE stop cosigner2 ;;
+  down)   load_env; shift; $COMPOSE down "$@" ;;
   logs)   load_env; shift; $COMPOSE logs "$@" ;;
-  *) sed -n '5,17p' "$0"; exit 1 ;;
+  *) sed -n '5,18p' "$0"; exit 1 ;;
 esac

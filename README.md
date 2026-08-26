@@ -16,6 +16,8 @@ Built for Ethereum (for now :) ).
 
 ## Quickstart
 
+### Try it: one machine, one command
+
 One machine, one command to a signing MPC wallet (Docker required) — a
 taste, not a custody setup, since one host holds every shard:
 
@@ -25,10 +27,17 @@ mkdir sovra-demo && cd sovra-demo
 sovra init demo && sovra up
 # → { "addresses": { "ethereum": "0x…" } }   API on http://127.0.0.1:3000
 ```
+`RUN.md` for more detailed info about the local dev flow.
 
-The real thing — shards on separate machines you own — is the same launcher
-with three roles (`cloud`, `pi`, `mac`) and two commands per host plus one
-roster paste. Follow `DEPLOY_RUNBOOK.md`; `RUN.md` covers the local dev flow.
+### Deploy it: every shard on a separate machine
+
+Every shard on separate machines you own. It uses the same launcher
+with three roles:
+- `cloud`: any Linux VM, holds one sealed shard and nothing else    
+- `pi`: aarch64, second shard    
+- `mac`: your Apple-silicon laptop, running the orchestrator plus the sleeping recovery shard     
+
+Follow `DEPLOY_RUNBOOK.md` 
 
 ## 1. Architecture
 

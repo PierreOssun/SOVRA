@@ -131,16 +131,4 @@ These are deliberate deferrals, not gaps:
 
 /!\ This repo is for demo purposes only.
 
-It uses the [0xCarbon DKLs23](https://github.com/0xCarbon/DKLs23) crate (Apache-2.0/MIT) as the MPC TSS implementation; message transport security (ed25519-signed, per-recipient-sealed round envelopes) is Sovra's own layer. No third-party audit of either is published — do not hold real value with this.
-
-## Recovery model
-
-2-of-3 = two active shards plus one sleeping shard. Recovery is a product flow, not a protocol operation:
-
-- **Proactive refresh** (`POST /v1/recover`): all three cosigners online, every shard re-randomizes under the SAME address; old shards become useless.
-- **Lost shard**: signing continues on the surviving pair (selection skips dead/unprovisioned parties automatically). You are now effectively 2-of-2 with zero redundancy — migrate promptly: wipe all shard stores, run a fresh DKG, move funds to the new address.
-- **Seedphrase-equivalent**: an offline encrypted backup of the sleeping shard's `data_dir` (shard + `identity.key`; keep the seal key in a separate location). Restoring the sleeping party's own files is plain state restore — no ceremony needed — and re-arms the redundancy.
-
-## Migrating a deployment from the sl-dkls23 era
-
-Shard formats are incompatible: **wipe every cosigner's shard store and run a fresh DKG** (then move funds from the old address). Everything else carries over unchanged: `identity.key`, pinned rosters, certificates, and configs — except `relay_url`, which now ends in `/env` instead of `/ws`.
+It uses the [0xCarbon DKLs23](https://github.com/0xCarbon/DKLs23) crate (Apache-2.0/MIT) as the MPC TSS implementation; message transport security (ed25519-signed, per-recipient-sealed round envelopes) is Sovra's own layer. No third-party audit of either is published. Do not hold real value with this.

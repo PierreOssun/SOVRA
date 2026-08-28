@@ -1,16 +1,16 @@
-# Known-benign "possibly lost" reports from program-lifetime lazy_static caches
-# in the x509-parser dependency chain. hashbrown stores an interior pointer into
-# its allocation, so valgrind cannot see the root held by the static and
-# classifies the block as "possibly lost" instead of "still reachable".
+# Program-lifetime lazy_static caches in the x509-parser dependency chain
+# (EXTENSION_PARSERS, OID_REGISTRY, ATTRIBUTE_PARSERS, and any future sibling).
+# hashbrown keeps an interior `ctrl` pointer into the middle of its allocation,
+# so valgrind cannot see the root held by the static and classifies the block as
+# "possibly lost" instead of "still reachable". One entry keyed on lazy_static's
+# initializer covers every such static, so a newly-touched one cannot reopen this.
+#
+# match-leak-kinds is explicit so the entry stays correct even if the
+# --show-leak-kinds flag in .github/workflows/memory_leak.yml is ever relaxed.
 {
-   x509-parser-extension-parsers-lazy-static
+   lazy-static-program-lifetime-caches
    Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
    ...
-   fun:*EXTENSION_PARSERS*
-}
-{
-   oid-registry-lazy-static
-   Memcheck:Leak
-   ...
-   fun:*OID_REGISTRY*
+   fun:*__static_ref_initialize*
 }

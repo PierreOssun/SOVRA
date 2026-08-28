@@ -49,10 +49,13 @@ jobs:
       # from VALGRINDFLAGS below. The #[ignore]d Sepolia test stays excluded
       # (no network).
       #
-      # The three crates whose tests drive real DKLs23 rounds are excluded:
-      # a single DKG is seconds natively but ~20-50x slower under valgrind,
-      # which times the job out. Their leak coverage lives in the manual
-      # valgrind-mpc job below.
+      # Everything that drives a real DKLs23 ceremony is excluded: a single DKG
+      # is seconds natively but ~20-50x slower under valgrind, so the ceremony's
+      # own round timeouts fire long before the job timeout does. That is three
+      # whole crates plus one test target in sovra-ipc -- --skip takes the test,
+      # keeping the rest of sovra-ipc's hub/TLS tests (the rustls and tokio
+      # paths, where a leak would actually matter) under valgrind. Their leak
+      # coverage lives in the manual valgrind-mpc job below.
       - name: cargo valgrind test
         # VALGRINDFLAGS is cargo-valgrind's pass-through for extra valgrind
         # options; it is split on single spaces, so keep this one line.
@@ -69,9 +72,11 @@ jobs:
           cargo valgrind test --workspace
           --exclude sovra-api
           --exclude sovra-cosigner
-          --exclude sovra-mpc-dkls23-silence
+          --exclude sovra-mpc-dkls23-carbon
+          -- --skip dkg_then_subset_sign_over_the_ws_hub
 
-  # Full-leak-check over the DKLs23-driving crates. Too slow to block PRs
+  # Full-leak-check over everything the PR job skips, sovra-ipc included (its
+  # env_ceremony DKG is the target --skip drops above). Too slow to block PRs
   # (each MPC round is minutes under valgrind), so it runs on demand only:
   # gh workflow run memory_leak.yml   (or the Actions "Run workflow" button).
   valgrind-mpc:
@@ -92,4 +97,4 @@ jobs:
         # the mTLS cert paths, which hit the identical x509-parser statics.
         env:
           VALGRINDFLAGS: --leak-check=full --show-leak-kinds=definite,indirect --suppressions=${{ github.workspace }}/valgrind.supp
-        run: cargo valgrind test -p sovra-mpc-dkls23-silence -p sovra-cosigner -p sovra-api
+        run: cargo valgrind test -p sovra-mpc-dkls23-carbon -p sovra-cosigner -p sovra-api -p sovra-ipc
